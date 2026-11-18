@@ -24,7 +24,7 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     h.addColumn ("Delay (samples)", colSamples, 110);
     h.addColumn ("ms", colMs, 70);
     h.addColumn ("metres", colMetres, 70);
-    h.addColumn ("Polarity", colPol, 70);
+    h.addColumn ("Polarity", colPol, 90);
     h.addColumn ("Confidence", colConf, 90);
     table.setColour (juce::ListBox::backgroundColourId, panel);
     table.setRowHeight (24);
