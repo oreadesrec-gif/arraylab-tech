@@ -252,6 +252,8 @@ void Hub::recompute (int slot)
     bool phase = false;
     int firLength = 0;
     const bool fromMono = numOut == 2 && (numIn == 1 || (numIn == 2 && m.monoSource));
+    const bool pair = numIn == 2 && ! m.monoSource;
+    const DelayResult vs[3] = { combinedResult (res, 0, pair), combinedResult (res, 1, pair), combinedResult (res, 2, pair) };
 
     if (isMain (m.role))
     {
@@ -273,10 +275,10 @@ void Hub::recompute (int slot)
         // Common delay: from the analysis when there is one, else from the plan if the user placed the mic.
         double base = 0.0;
         bool known = true;
-        if (res.vs[0].valid && res.vs[2].valid)  base = -0.5 * (res.vs[0].delaySamples + res.vs[2].delaySamples);
-        else if (res.vs[1].valid)                base = -res.vs[1].delaySamples;
-        else if (res.vs[0].valid)                base = -res.vs[0].delaySamples;
-        else if (res.vs[2].valid)                base = -res.vs[2].delaySamples;
+        if (vs[0].valid && vs[2].valid)  base = -0.5 * (vs[0].delaySamples + vs[2].delaySamples);
+        else if (vs[1].valid)            base = -vs[1].delaySamples;
+        else if (vs[0].valid)            base = -vs[0].delaySamples;
+        else if (vs[2].valid)            base = -vs[2].delaySamples;
         else if (m.manualPosition)             { base = (0.5 * (rL + rR) - m.sourceDistance) / c * sr; a.note = "Delay from the plan (not analysed)"; }
         else                                   { known = false; a.note = "Not analysed yet"; }
 
@@ -367,7 +369,8 @@ void Hub::place (int slot)
         return std::sqrt (juce::jmax (0.01, d * d - dz * dz));
     };
 
-    const auto& v = s.results.vs;
+    const bool pair = s.numIn.load() == 2 && ! m.monoSource;
+    const DelayResult v[3] = { combinedResult (s.results, 0, pair), combinedResult (s.results, 1, pair), combinedResult (s.results, 2, pair) };
     Vec2 p { m.x, m.y };
     if (v[0].valid && v[2].valid)   p = locate (geo, horizontal (v[0]), horizontal (v[2]));
     else if (v[1].valid)          { const double r = horizontal (v[1]); p = { geo.pos[1].x + geo.forward.x * r, geo.pos[1].y + geo.forward.y * r }; }
@@ -466,7 +469,7 @@ void Hub::analyse()
     if (resetRequested.exchange (false))
     {
         for (auto& s : slots)
-            for (int r = 0; r < 3; ++r) { s.estimator[r].reset (frameSize); s.estimatorRef[r] = -1; }
+            s.resetEstimators (frameSize);
         framePos = -1;
     }
 
@@ -474,7 +477,7 @@ void Hub::analyse()
         return;
 
     // The plan: who is measured against whom.
-    struct Target { int slot; RefSet refs; };
+    struct Target { int slot; RefSet refs; bool pair; };
     std::vector<Target> targets;
     int clock = -1;
     {
@@ -485,7 +488,7 @@ void Hub::analyse()
             if (! s.active.load()) continue;
             if (clock < 0 && s.playing.load() && s.sampleRate.load() > 0.0) clock = i;
             if (! isMain (s.state.role))
-                targets.push_back ({ i, refsForGroup (s.state.group) });
+                targets.push_back ({ i, refsForGroup (s.state.group), s.numIn.load() == 2 && ! s.state.monoSource });
         }
     }
     if (clock < 0)
@@ -502,7 +505,7 @@ void Hub::analyse()
         refSpectra.clear();
         frame.assign ((size_t) frameSize, 0.0f);
         for (auto& s : slots)
-            for (int r = 0; r < 3; ++r) { s.estimator[r].reset (frameSize); s.estimatorRef[r] = -1; }
+            s.resetEstimators (frameSize);
         framePos = -1;
     }
 
@@ -550,7 +553,7 @@ void Hub::analyse()
                 const int rslot = t.refs.slot[r];
                 if (rslot < 0 || rslot == t.slot) continue;
                 const int key = rslot * 2 + t.refs.channel[r];
-                if (s.estimatorRef[r] != key) { s.estimator[r].reset (frameSize); s.estimatorRef[r] = key; }
+                if (s.estimatorRef[r] != key) { s.estimator[r].reset (frameSize); s.estimatorRight[r].reset (frameSize); s.estimatorRef[r] = key; }
                 auto* ref = refSpectrum (rslot, t.refs.channel[r]);
                 if (ref == nullptr) continue;
                 if (! haveTarget)
@@ -561,6 +564,19 @@ void Hub::analyse()
                 }
                 s.estimator[r].accumulate (*ref, *tgtSpectrum);
                 changed = true;
+            }
+
+            // Second channel of a stereo spot, against the same references.
+            if (t.pair && haveTarget && readFrame (s, 1, framePos, frameSize, frame.data()))
+            {
+                tgtSpectrum->compute (*fft, frame.data());
+                for (int r = 0; r < 3; ++r)
+                {
+                    const int rslot = t.refs.slot[r];
+                    if (rslot < 0 || rslot == t.slot) continue;
+                    if (auto* ref = refSpectrum (rslot, t.refs.channel[r]))
+                        s.estimatorRight[r].accumulate (*ref, *tgtSpectrum);
+                }
             }
         }
         framePos += frameSize / 2;
@@ -579,6 +595,8 @@ void Hub::analyse()
             if (s.estimatorRef[r] >= 0 && s.estimator[r].frames() > 0)
             {
                 res.vs[r] = s.estimator[r].estimate (*fft, sr, scratch);
+                if (t.pair && s.estimatorRight[r].frames() > 0)
+                    res.vsRight[r] = s.estimatorRight[r].estimate (*fft, sr, scratch);
                 mostFrames = juce::jmax (mostFrames, res.vs[r].frames);
                 any = true;
             }
@@ -620,6 +638,7 @@ juce::ValueTree Hub::saveInstance (int slot) const
     mic.setProperty ("phaseOn", m.phaseOn, nullptr);  mic.setProperty ("offsetMs", m.offsetMs, nullptr);
     mic.setProperty ("panOn", m.panOn, nullptr);      mic.setProperty ("panAmount", m.panAmount, nullptr);
     mic.setProperty ("timePan", m.timePan, nullptr);  mic.setProperty ("monoSource", m.monoSource, nullptr);
+    mic.setProperty ("pairSpacing", m.pairSpacingCm, nullptr); mic.setProperty ("pairAngle", m.pairAngleDeg, nullptr);
     t.addChild (mic, -1, nullptr);
 
     juce::ValueTree res ("Results");
@@ -632,6 +651,9 @@ juce::ValueTree Hub::saveInstance (int slot) const
         res.setProperty ("valid" + k, v.valid, nullptr);       res.setProperty ("delay" + k, v.delaySamples, nullptr);
         res.setProperty ("polarity" + k, v.polarity, nullptr); res.setProperty ("confidence" + k, v.confidence, nullptr);
         res.setProperty ("frames" + k, v.frames, nullptr);
+        res.setProperty ("validRight" + k, s.results.vsRight[r].valid, nullptr);
+        res.setProperty ("delayRight" + k, s.results.vsRight[r].delaySamples, nullptr);
+        res.setProperty ("confidenceRight" + k, s.results.vsRight[r].confidence, nullptr);
     }
     juce::StringArray bands;
     for (auto& b : s.results.phase) { bands.add (juce::String (b.real(), 5)); bands.add (juce::String (b.imag(), 5)); }
@@ -679,6 +701,7 @@ void Hub::restoreInstance (int slot, const juce::ValueTree& t)
         m.phaseOn = mic.getProperty ("phaseOn", false);  m.offsetMs = mic.getProperty ("offsetMs", 0.0);
         m.panOn = mic.getProperty ("panOn", true);       m.panAmount = mic.getProperty ("panAmount", 1.0);
         m.timePan = mic.getProperty ("timePan", 1.0);    m.monoSource = mic.getProperty ("monoSource", false);
+        m.pairSpacingCm = mic.getProperty ("pairSpacing", 17.0); m.pairAngleDeg = mic.getProperty ("pairAngle", 110.0);
     }
 
     if (auto res = t.getChildWithName ("Results"); res.isValid())
@@ -694,6 +717,9 @@ void Hub::restoreInstance (int slot, const juce::ValueTree& t)
             v.polarity = (int) res.getProperty ("polarity" + k, 1) < 0 ? -1 : 1;
             v.confidence = res.getProperty ("confidence" + k, 0.0);
             v.frames = res.getProperty ("frames" + k, 0);
+            r.vsRight[i].valid = res.getProperty ("validRight" + k, false);
+            r.vsRight[i].delaySamples = res.getProperty ("delayRight" + k, 0.0);
+            r.vsRight[i].confidence = res.getProperty ("confidenceRight" + k, 0.0);
         }
         const auto bands = juce::StringArray::fromTokens (res.getProperty ("phase").toString(), " ", "");
         for (int b = 0; b < kNumBands && b * 2 + 1 < bands.size(); ++b)

@@ -17,6 +17,9 @@ One instance per track, one shared window.
   its own bypass, plus a global bypass. A mono spot on a stereo output gets its
   own delay towards the left and right main microphones, and a level pan
   derived from where it sits on the plan.
+- **Stereo spots**: a spot on a stereo track is a pair with its own spacing
+  and angle. Both capsules are measured and the pair is moved as one block,
+  so its own image is kept.
 - **Groups**: up to eight, each with its own main array as reference, or
   following the Main group when it has none.
 - **Align**: the same data as a table, with one-click bypass switches.

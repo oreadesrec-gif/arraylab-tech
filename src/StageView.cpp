@@ -63,6 +63,11 @@ void StageView::drawMic (juce::Graphics& g, juce::Point<float> p, double axisDeg
         g.drawEllipse (p.x - 10.0f, p.y - 10.0f, 20.0f, 20.0f, 1.6f);
     }
 
+    drawLabel (g, p, label, sub, isSelected);
+}
+
+void StageView::drawLabel (juce::Graphics& g, juce::Point<float> p, const juce::String& label, const juce::String& sub, bool isSelected)
+{
     g.setColour (isSelected ? ui::text : ui::text.withAlpha (0.85f));
     g.setFont (juce::FontOptions (13.0f));
     g.drawText (label, juce::Rectangle<float> (p.x - 80.0f, p.y + 11.0f, 160.0f, 16.0f), juce::Justification::centred, false);
@@ -194,7 +199,31 @@ void StageView::paint (juce::Graphics& g)
         if (a.phaseTaps > 0) sub << juce::String::fromUTF8 ("  \xcf\x86");
         auto colour = ui::groupColour (m.state.group);
         if (m.state.role == Role::ambience)  colour = colour.withSaturation (0.35f);
-        drawMic (g, p, m.state.angleDeg, m.state.pattern, colour, m.state.name, sub, m.index == selected, true);
+        if (m.isStereoPair())
+        {
+            // Two capsules either side of the pair's centre, splayed around its aim.
+            ArraySettings pairShape;
+            pairShape.x = m.state.x; pairShape.y = m.state.y; pairShape.rotationDeg = m.state.angleDeg;
+            pairShape.spacingCm = m.state.pairSpacingCm; pairShape.angleDeg = m.state.pairAngleDeg;
+            const auto pg = arrayGeometry (pairShape);
+            for (int i : { 0, 2 })
+            {
+                auto q = toScreen (pg.pos[i]);
+                const float nudge = juce::jmax (0.0f, 5.0f - q.getDistanceFrom (p)); // keep a coincident pair readable
+                q += juce::Point<float> ((float) pg.right.x, (float) -pg.right.y) * (i == 0 ? -nudge : nudge);
+                drawMic (g, q, pg.axisDeg[i], m.state.pattern, colour, {}, {}, m.index == selected, false);
+            }
+            g.setColour (colour.withAlpha (0.7f));
+            g.drawLine ({ toScreen (pg.pos[0]), toScreen (pg.pos[2]) }, 1.5f);
+            const auto dd = direction (m.state.angleDeg);
+            const juce::Point<float> tip { p.x + 38.0f * (float) dd.x, p.y - 38.0f * (float) dd.y };
+            g.drawLine ({ p, tip }, 1.0f);
+            g.setColour (m.index == selected ? ui::text : colour);
+            g.fillEllipse (tip.x - 3.5f, tip.y - 3.5f, 7.0f, 7.0f);
+            drawLabel (g, p + juce::Point<float> (0.0f, 14.0f), m.state.name + "  (pair)", sub, m.index == selected);
+        }
+        else
+            drawMic (g, p, m.state.angleDeg, m.state.pattern, colour, m.state.name, sub, m.index == selected, true);
         const auto d = direction (m.state.angleDeg);
         hits.push_back ({ { p.x + 38.0f * (float) d.x, p.y - 38.0f * (float) d.y }, Kind::micHandle, m.index, m.state.group });
         hits.push_back ({ p, Kind::mic, m.index, m.state.group });

@@ -39,7 +39,7 @@ private:
     juce::TextEditor name, groupName;
     juce::TextButton placeButton { "Place from analysis" };
     juce::ComboBox *role, *groupBox, *pattern, *arrayType, *arrayPattern, *panLaw;
-    juce::Slider *x, *y, *z, *angle, *sourceDistance, *offset, *panAmount, *timePan,
+    juce::Slider *x, *y, *z, *angle, *sourceDistance, *pairSpacing, *pairAngle, *offset, *panAmount, *timePan,
                  *spacing, *arrayAngle, *forward, *arrayHeight, *rotation, *temperature;
     juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource;
     juce::Label *measured, *applied, *note, *arrayHeader;

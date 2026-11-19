@@ -23,6 +23,8 @@ Inspector::Inspector (Hub& h) : hub (h)
     z = &slider ("Height", 0.0, 30.0, 0.05, " m", mic);
     angle = &slider ("Aim", -180.0, 180.0, 1.0, deg, mic);
     sourceDistance = &slider ("Mic to source", 0.0, 10.0, 0.05, " m", mic);
+    pairSpacing = &slider ("Pair spacing", 0.0, 300.0, 1.0, " cm", mic);
+    pairAngle = &slider ("Pair angle", 0.0, 180.0, 1.0, deg, mic);
 
     header ("ALIGNMENT");
     delayOn = &toggle ("Delay", mic);
@@ -179,6 +181,7 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
     }
     pick (role, (int) m.role); pick (groupBox, m.group); pick (pattern, (int) m.pattern);
     set (x, m.x); set (y, m.y); set (z, m.z); set (angle, m.angleDeg); set (sourceDistance, m.sourceDistance);
+    set (pairSpacing, m.pairSpacingCm); set (pairAngle, m.pairAngleDeg);
     delayOn->setToggleState (m.delayOn, juce::dontSendNotification);
     polarityOn->setToggleState (m.polarityOn, juce::dontSendNotification);
     phaseOn->setToggleState (m.phaseOn, juce::dontSendNotification);
@@ -195,13 +198,15 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
                                 (juce::Component*) monoSource, (juce::Component*) &placeButton })
         c->setEnabled (! main);
     monoSource->setEnabled (! main && info->numIn == 2);
+    pairSpacing->setEnabled (info->isStereoPair());
+    pairAngle->setEnabled (info->isStereoPair());
 
     // Readouts.
     static const char* tags[3] = { "L", "C", "R" };
     juce::String meas;
     for (int r = 0; r < 3; ++r)
     {
-        const auto& v = info->results.vs[r];
+        const auto v = combinedResult (info->results, r, info->isStereoPair());
         if (! v.valid) continue;
         const double msec = 1000.0 * v.delaySamples / info->sampleRate;
         meas << tags[r] << "   " << juce::String (msec, 3) << " ms   " << juce::String (std::abs (speedOfSound (scene.tempC) * msec * 0.001), 2)
@@ -246,6 +251,8 @@ void Inspector::commitMic()
     m.x = x->getValue(); m.y = y->getValue(); m.z = z->getValue();
     m.angleDeg = angle->getValue();
     m.sourceDistance = sourceDistance->getValue();
+    m.pairSpacingCm = pairSpacing->getValue();
+    m.pairAngleDeg = pairAngle->getValue();
     m.delayOn = delayOn->getToggleState();
     m.polarityOn = polarityOn->getToggleState();
     m.phaseOn = phaseOn->getToggleState();

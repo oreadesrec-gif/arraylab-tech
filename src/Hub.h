@@ -30,16 +30,34 @@ struct MicState
     double panAmount = 1.0;             // level difference: 0 = centre, 1 = as the main pair hears it
     double timePan = 1.0;               // time difference between L and R: 0 = none, 1 = natural
     bool monoSource = false;            // stereo track carrying a mono mic on its left channel
+
+    // A spot on a stereo track is a pair: its two capsules sit either side of x/y, aimed around angleDeg.
+    double pairSpacingCm = 17.0, pairAngleDeg = 110.0;
 };
 
 /** What the analysis measured for one microphone. Index 0 = vs L, 1 = vs C, 2 = vs R. */
 struct MicResults
 {
     DelayResult vs[3];
+    DelayResult vsRight[3];             // second channel of a stereo spot
     std::array<std::complex<float>, kNumBands> phase {};
     bool phaseValid = false;
     int primary = -1;
 };
+
+/** Delay of a microphone against reference `r`. A stereo spot is moved as one
+    block, by the mean of its two channels, so its own image is left intact. */
+inline DelayResult combinedResult (const MicResults& res, int r, bool stereoPair)
+{
+    auto v = res.vs[r];
+    const auto& b = res.vsRight[r];
+    if (stereoPair && v.valid && b.valid)
+    {
+        v.delaySamples = 0.5 * (v.delaySamples + b.delaySamples);
+        v.confidence = juce::jmin (v.confidence, b.confidence);
+    }
+    return v;
+}
 
 /** What is actually applied to the audio, for display. */
 struct MicApplied
@@ -61,6 +79,8 @@ struct MicInfo
     double sampleRate = 0.0;
     int blockSize = 0, numIn = 0, numOut = 0;
     bool hasPlayhead = false, playing = false;
+
+    bool isStereoPair() const noexcept { return numIn == 2 && ! state.monoSource && ! isMain (state.role); }
 };
 
 /** Session-wide settings shared by every instance. */
@@ -157,8 +177,12 @@ private:
         int firLength = 0, firVersion = 0, firBuilt = -1;
 
         // analysis thread only
-        DelayEstimator estimator[3];
+        DelayEstimator estimator[3], estimatorRight[3];
         int estimatorRef[3] { -1, -1, -1 };
+        void resetEstimators (int frameSize)
+        {
+            for (int r = 0; r < 3; ++r) { estimator[r].reset (frameSize); estimatorRight[r].reset (frameSize); estimatorRef[r] = -1; }
+        }
     };
 
     struct RefSet { int slot[3] { -1, -1, -1 }; int channel[3] { 0, 0, 0 }; };

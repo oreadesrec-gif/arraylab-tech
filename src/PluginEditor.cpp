@@ -155,14 +155,14 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
     const bool main = isMain (m.state.role);
     const auto delay = [&] (int r) -> juce::String
     {
-        const auto& v = m.results.vs[r];
+        const auto v = combinedResult (m.results, r, m.isStereoPair());
         return v.valid ? juce::String (1000.0 * v.delaySamples / m.sampleRate, 3) + (v.polarity < 0 ? juce::String::fromUTF8 (" \xc3\x98") : juce::String()) : "-";
     };
     switch (column)
     {
         case colName:     return m.state.name + (m.index == proc.slot() ? "  (this track)" : "");
         case colGroup:    return scene.groupNames[m.state.group];
-        case colRole:     return ui::roleNames()[(int) m.state.role].upToFirstOccurrenceOf (" (", false, false);
+        case colRole:     return ui::roleNames()[(int) m.state.role].upToFirstOccurrenceOf (" (", false, false) + (m.isStereoPair() ? " pair" : "");
         case colL:        return main ? "ref" : delay (0);
         case colC:        return main ? "ref" : delay (1);
         case colR:        return main ? "ref" : delay (2);

@@ -53,7 +53,7 @@ int main()
     const auto at = [&] (int s, int i) { return i >= 0 ? src[s][(size_t) i] : 0.0f; };
 
     FakePlayHead head;
-    ArrayLabProcessor mainPair, spot[numSources];
+    ArrayLabProcessor mainPair, spot[numSources], pairSpot; // pairSpot: a stereo pair on instrument 1
     auto& hub = mainPair.hub();
     mainPair.setPlayHead (&head);
     mainPair.setPlayConfigDetails (2, 2, sr, block);
@@ -76,6 +76,18 @@ int main()
         m.phaseOn = s == 2;
         hub.setMic (spot[s].slot(), m);
     }
+
+    pairSpot.setPlayHead (&head);
+    pairSpot.setPlayConfigDetails (2, 2, sr, block);
+    pairSpot.prepareToPlay (sr, block);
+    {
+        auto m = hub.getMic (pairSpot.slot());
+        m.name = "Pair";
+        m.pairSpacingCm = 30.0; m.pairAngleDeg = 90.0;
+        hub.setMic (pairSpot.slot(), m);
+    }
+    const int pairGap = 8; // samples between the pair's two capsules for this source
+    std::vector<float> pairOutL, pairOutR;
 
     // Spot 2 is wired out of phase; spot 3 goes through a phase-shifting stage.
     float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
@@ -123,6 +135,15 @@ int main()
                         if (s == 0) { outR0.push_back (buf.getSample (1, i)); wantR0.push_back (at (s, cursor + i - toR[s])); }
                     }
             }
+            for (int i = 0; i < block; ++i)
+            {
+                buf.setSample (0, i, at (0, cursor + i - toSpot));
+                buf.setSample (1, i, at (0, cursor + i - toSpot - pairGap));
+            }
+            pairSpot.processBlock (buf, midi);
+            if (record)
+                for (int i = 0; i < block; ++i) { pairOutL.push_back (buf.getSample (0, i)); pairOutR.push_back (buf.getSample (1, i)); }
+
             if ((cursor / block) % 2 == 0) juce::Thread::sleep (1);
         }
     };
@@ -153,6 +174,18 @@ int main()
     for (auto& m : frozen)
     {
         if (isMain (m.state.role)) continue;
+        if (m.index == pairSpot.slot())
+        {
+            const auto l = combinedResult (m.results, 0, true);
+            std::printf ("  Pair: left capsule vs L %.2f, right capsule vs L %.2f, moved as one by %.2f (want %.1f)  applied L %.3f / R %.3f ms\n",
+                         m.results.vs[0].delaySamples, m.results.vsRight[0].delaySamples, l.delaySamples,
+                         toSpot + pairGap * 0.5 - toL[0], m.applied.delayLms, m.applied.delayRms);
+            check (m.isStereoPair() && std::abs (m.results.vs[0].delaySamples - (toSpot - toL[0])) < 0.6
+                       && std::abs (m.results.vsRight[0].delaySamples - (toSpot + pairGap - toL[0])) < 0.6, "stereo spot: each capsule measured");
+            check (std::abs (l.delaySamples - (toSpot + pairGap * 0.5 - toL[0])) < 0.6
+                       && juce::exactlyEqual (m.applied.delayLms, m.applied.delayRms) && m.applied.delayLms > 1.0, "stereo spot: one common delay for the pair");
+            continue;
+        }
         const int s = m.index - spot[0].slot();
         const auto& vs = m.results.vs;
         std::printf ("  %s: vs L %.2f (want %d)  vs R %.2f (want %d)  polarity %+d  placed (%.2f, %.2f)  applied L %.2f / R %.2f ms  gains %.2f / %.2f  %s\n",
@@ -180,6 +213,12 @@ int main()
     check (gainOf (0, false) > gainOf (0, true), "spot 1 (left of centre) is panned left");
     check (gainOf (1, true) > gainOf (1, false), "spot 2 (right of centre) is panned right");
     check (match (tail (outL[1]), tail (wantL[1])) > 0.999, "spot 2 polarity corrected and aligned");
+    {
+        // The pair's own image must survive: right still trails left by the same gap.
+        const auto l = tail (pairOutL), r = tail (pairOutR);
+        check (match (std::vector<float> (l.begin(), l.end() - pairGap), std::vector<float> (r.begin() + pairGap, r.end())) > 0.999,
+               "stereo spot: its internal image is kept");
+    }
     const double withPhase = match (tail (outL[2]), tail (wantL[2]));
 
     auto m3 = hub.getMic (spot[2].slot());
