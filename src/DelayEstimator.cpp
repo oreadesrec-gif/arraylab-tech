@@ -28,34 +28,65 @@ void DelayEstimator::reset (int frameSize)
 {
     n = frameSize;
     numFrames = 0;
-    sxy.assign ((size_t) n / 2 + 1, {});
-    sxx.assign ((size_t) n / 2 + 1, 0.0);
-    syy.assign ((size_t) n / 2 + 1, 0.0);
+    sxy.clear(); sxx.clear(); syy.clear(); // reallocated on first use
 }
 
 void DelayEstimator::accumulate (const FrameSpectrum& ref, const FrameSpectrum& tgt)
 {
     // Skip silence: it only adds noise to the average.
-    if (ref.energy() < 1e-10 || tgt.energy() < 1e-10)
+    if (n == 0 || ref.energy() < 1e-10 || tgt.energy() < 1e-10)
         return;
+
+    if (sxy.empty())
+    {
+        sxy.assign ((size_t) n / 2 + 1, {});
+        sxx.assign ((size_t) n / 2 + 1, 0.0f);
+        syy.assign ((size_t) n / 2 + 1, 0.0f);
+    }
 
     const auto& x = ref.bins();
     const auto& y = tgt.bins();
     for (size_t k = 0; k < sxy.size(); ++k)
     {
-        const std::complex<double> xd (x[k]), yd (y[k]);
-        sxy[k] += yd * std::conj (xd);
-        sxx[k] += std::norm (xd);
-        syy[k] += std::norm (yd);
+        sxy[k] += y[k] * std::conj (x[k]);
+        sxx[k] += std::norm (x[k]);
+        syy[k] += std::norm (y[k]);
     }
     ++numFrames;
+}
+
+void DelayEstimator::phaseBands (double sampleRate, double delaySamples, int polarity, std::complex<float>* bands) const
+{
+    std::complex<double> sum[kNumBands] {};
+    double weight[kNumBands] {};
+    if (numFrames > 0 && ! sxy.empty())
+    {
+        const double step = std::log (kBandHigh / kBandLow) / (kNumBands - 1);
+        const int lo = std::max (1, (int) std::ceil (kBandLow * n / sampleRate));
+        const int hi = std::min (n / 2 - 1, (int) std::floor (kBandHigh * n / sampleRate));
+        for (int k = lo; k <= hi; ++k)
+        {
+            const double den = std::sqrt ((double) sxx[(size_t) k] * (double) syy[(size_t) k]);
+            if (den <= 0.0) continue;
+            const double turn = 2.0 * kPi * k * delaySamples / n;
+            const auto v = std::complex<double> (sxy[(size_t) k]) / den
+                           * std::complex<double> (std::cos (turn), std::sin (turn)) * (double) polarity;
+            const double pos = std::clamp (std::log (k * sampleRate / n / kBandLow) / step, 0.0, (double) kNumBands - 1.0);
+            const int b = std::min ((int) pos, kNumBands - 2);
+            const double f = pos - b;
+            sum[b] += v * (1.0 - f);      weight[b] += 1.0 - f;
+            sum[b + 1] += v * f;          weight[b + 1] += f;
+        }
+    }
+    for (int b = 0; b < kNumBands; ++b)
+        bands[b] = weight[b] > 0.0 ? std::complex<float> (sum[b] / weight[b]) : std::complex<float> {};
 }
 
 DelayResult DelayEstimator::estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& c) const
 {
     DelayResult r;
     r.frames = numFrames;
-    if (numFrames == 0 || n == 0)
+    if (numFrames == 0 || n == 0 || sxy.empty())
         return r;
 
     c.assign ((size_t) n, {});
@@ -66,9 +97,9 @@ DelayResult DelayEstimator::estimate (const Fft& fft, double sampleRate, std::ve
 
     for (int k = lo; k <= hi; ++k)
     {
-        const double den = std::sqrt (sxx[(size_t) k] * syy[(size_t) k]);
+        const double den = std::sqrt ((double) sxx[(size_t) k] * (double) syy[(size_t) k]);
         if (den <= 0.0) continue;
-        const auto w = sxy[(size_t) k] / den; // complex coherence, |w| <= 1
+        const auto w = std::complex<double> (sxy[(size_t) k]) / den; // complex coherence, |w| <= 1
         c[(size_t) k] = { (float) w.real(), (float) w.imag() };
         c[(size_t) (n - k)] = std::conj (c[(size_t) k]);
     }

@@ -1,174 +1,263 @@
 #include "PluginEditor.h"
 
+using namespace arraylab;
+
 namespace
 {
-enum Column { colIndex = 1, colName, colIO, colRate, colState, colPos, colSamples, colMs, colMetres, colPol, colConf };
-constexpr double speedOfSound = 343.0; // m/s at 20 degrees C
+enum Column { colName = 1, colGroup, colRole, colL, colC, colR, colConf, colApplied, colDelay, colPolarity, colPhase, colIO };
 
-const juce::Colour background { 0xff15181d }, panel { 0xff1e232b }, text { 0xffe6e9ee },
-                   dim { 0xff8b95a5 }, accent { 0xff4fb3ff }, own { 0xff263445 };
+juce::String timeText (double seconds)
+{
+    const int s = (int) seconds;
+    return juce::String (s / 60).paddedLeft ('0', 2) + ":" + juce::String (s % 60).paddedLeft ('0', 2);
+}
 }
 
 ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
-    : AudioProcessorEditor (p), proc (p),
-      delayAttachment (p.params, "testDelay", delaySlider),
-      invertAttachment (p.params, "testInvert", invertButton)
+    : AudioProcessorEditor (p), proc (p), hub (p.hub()), stage (p.hub()), inspector (p.hub())
 {
-    auto& h = table.getHeader();
-    h.addColumn ("#", colIndex, 36);
-    h.addColumn ("Mic", colName, 170);
-    h.addColumn ("In>Out", colIO, 60);
-    h.addColumn ("Rate / block", colRate, 110);
-    h.addColumn ("Transport", colState, 90);
-    h.addColumn ("Timeline (samples)", colPos, 130);
-    h.addColumn ("Delay (samples)", colSamples, 110);
-    h.addColumn ("ms", colMs, 70);
-    h.addColumn ("metres", colMetres, 70);
-    h.addColumn ("Polarity", colPol, 90);
-    h.addColumn ("Confidence", colConf, 90);
-    table.setColour (juce::ListBox::backgroundColourId, panel);
-    table.setRowHeight (24);
-    addAndMakeVisible (table);
+    setLookAndFeel (&look);
+    selected = proc.slot();
 
-    for (auto* l : { &header, &hint, &nameLabel, &delayLabel })
-    {
-        l->setColour (juce::Label::textColourId, l == &hint ? dim : text);
-        addAndMakeVisible (*l);
-    }
-    hint.setText ("Delay is relative to the reference: positive = this mic hears the source later. "
-                  "Press play; the estimate sharpens the longer the music runs. Double-click a row to make it the reference.",
-                  juce::dontSendNotification);
-    hint.setFont (juce::FontOptions (13.0f));
+    title.setFont (juce::FontOptions (20.0f, juce::Font::bold));
+    title.setColour (juce::Label::textColourId, ui::text);
+    status.setColour (juce::Label::textColourId, ui::dim);
+    status.setFont (juce::FontOptions (13.0f));
+    hint.setColour (juce::Label::textColourId, ui::warn);
+    hint.setFont (juce::FontOptions (13.5f));
+    for (auto* c : { (juce::Component*) &title, (juce::Component*) &status, (juce::Component*) &hint, (juce::Component*) &analyseButton,
+                     (juce::Component*) &resetButton, (juce::Component*) &stageTab, (juce::Component*) &alignTab, (juce::Component*) &addGroupButton,
+                     (juce::Component*) &copyButton, (juce::Component*) &bypassButton, (juce::Component*) &groupBox,
+                     (juce::Component*) &stage, (juce::Component*) &inspector, (juce::Component*) &table })
+        addAndMakeVisible (c);
 
-    nameEditor.setText (proc.getUserName(), false);
-    nameEditor.setTextToShowWhenEmpty ("name (empty = track name from host)", dim);
-    nameEditor.onTextChange = [this] { proc.setUserName (nameEditor.getText()); };
-    addAndMakeVisible (nameEditor);
-    addAndMakeVisible (delaySlider);
-    addAndMakeVisible (invertButton);
-
-    refButton.onClick = [this]
-    {
-        if (juce::isPositiveAndBelow (table.getSelectedRow(), rows.size()))
-            proc.hub().setReference (rows[table.getSelectedRow()].index);
-    };
-    resetButton.onClick = [this] { proc.hub().resetAnalysis(); };
+    analyseButton.onClick = [this] { if (hub.isAnalysing()) hub.stopAnalysis(); else hub.startAnalysis(); timerCallback(); };
+    resetButton.onClick = [this] { hub.resetAnalysis(); timerCallback(); };
+    bypassButton.onClick = [this] { hub.setBypassed (bypassButton.getToggleState()); };
     copyButton.onClick = [this] { juce::SystemClipboard::copyTextToClipboard (buildReport()); };
-    for (auto* b : { &refButton, &resetButton, &copyButton })
-        addAndMakeVisible (*b);
+    addGroupButton.onClick = [this]
+    {
+        auto sc = hub.getScene();
+        if (sc.numGroups < kMaxGroups) { ++sc.numGroups; hub.setScene (sc); }
+    };
+    groupBox.onChange = [this] { groupFilter = groupBox.getSelectedId() - 2; timerCallback(); };
+
+    for (auto* t : { &stageTab, &alignTab })
+    {
+        t->setClickingTogglesState (true);
+        t->setRadioGroupId (1);
+        t->setColour (juce::TextButton::buttonOnColourId, ui::accent.withAlpha (0.55f));
+    }
+    stageTab.setConnectedEdges (juce::Button::ConnectedOnRight);
+    alignTab.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    stageTab.onClick = [this] { showStage (true); };
+    alignTab.onClick = [this] { showStage (false); };
+    stageTab.setToggleState (true, juce::dontSendNotification);
+
+    stage.onSelect = [this] (int slot) { select (slot); };
+
+    auto& h = table.getHeader();
+    h.addColumn ("Mic", colName, 140);
+    h.addColumn ("Group", colGroup, 76);
+    h.addColumn ("Role", colRole, 74);
+    h.addColumn ("vs L (ms)", colL, 72);
+    h.addColumn ("vs C (ms)", colC, 72);
+    h.addColumn ("vs R (ms)", colR, 72);
+    h.addColumn ("Conf.", colConf, 56);
+    h.addColumn ("Applied (ms)", colApplied, 140);
+    h.addColumn ("Delay", colDelay, 48);
+    h.addColumn ("Polarity", colPolarity, 60);
+    h.addColumn ("Phase", colPhase, 50);
+    table.setColour (juce::ListBox::backgroundColourId, ui::panel);
+    table.setRowHeight (24);
+    table.setVisible (false);
 
     setResizable (true, true);
-    setResizeLimits (860, 320, 1800, 1400);
-    setSize (1040, 460);
-    startTimerHz (5);
+    setResizeLimits (980, 560, 2400, 1600);
+    setSize (1240, 760);
+    startTimerHz (10);
     timerCallback();
 }
 
-ArrayLabEditor::~ArrayLabEditor() { stopTimer(); }
+ArrayLabEditor::~ArrayLabEditor()
+{
+    stopTimer();
+    setLookAndFeel (nullptr);
+}
+
+void ArrayLabEditor::select (int slot)
+{
+    selected = slot;
+    timerCallback();
+}
+
+void ArrayLabEditor::showStage (bool show)
+{
+    stage.setVisible (show);
+    table.setVisible (! show);
+}
 
 void ArrayLabEditor::timerCallback()
 {
-    rows = proc.hub().snapshot();
-    reference = proc.hub().getReference();
+    mics = hub.snapshot();
+    scene = hub.getScene();
 
-    juce::String refName = "none";
-    for (auto& r : rows)
-        if (r.index == reference) refName = r.name;
+    bool found = false, anyMain = false, anyPlaying = false, anyResult = false, anyTimeline = false;
+    for (auto& m : mics)
+    {
+        found |= m.index == selected;
+        anyMain |= isMain (m.state.role);
+        anyPlaying |= m.playing;
+        anyTimeline |= m.hasPlayhead;
+        anyResult |= m.results.primary >= 0;
+    }
+    if (! found) selected = proc.slot();
 
-    header.setText ("ArrayLab Probe 0.1   |   host: " + juce::String (juce::PluginHostType().getHostDescription())
-                        + "   |   hub " + juce::String::toHexString ((juce::pointer_sized_int) &proc.hub())
-                        + "   |   " + juce::String (rows.size()) + " instance(s) linked   |   reference: " + refName,
+    rows.clearQuick();
+    for (auto& m : mics)
+        if (groupFilter < 0 || m.state.group == groupFilter)
+            rows.add (m);
+
+    if (groupBox.getNumItems() != scene.numGroups + 1 || ! groupBox.isPopupActive())
+    {
+        groupBox.clear (juce::dontSendNotification);
+        groupBox.addItem ("All groups", 1);
+        for (int g = 0; g < scene.numGroups; ++g) groupBox.addItem (scene.groupNames[g], g + 2);
+        groupBox.setSelectedId (groupFilter + 2, juce::dontSendNotification);
+    }
+    addGroupButton.setEnabled (scene.numGroups < kMaxGroups);
+
+    const bool analysing = hub.isAnalysing();
+    analyseButton.setButtonText (analysing ? "Stop   " + timeText (hub.analysedSeconds()) : "Analyze");
+    analyseButton.setColour (juce::TextButton::buttonColourId, analysing ? ui::bad.darker (0.3f) : ui::accent.darker (0.5f));
+    bypassButton.setToggleState (hub.bypassed(), juce::dontSendNotification);
+
+    status.setText (juce::String (mics.size()) + (mics.size() == 1 ? " mic linked" : " mics linked")
+                        + "   |   " + (anyPlaying ? "playing" : "stopped")
+                        + (anyResult && ! analysing ? "   |   analysis kept: " + timeText (hub.analysedSeconds()) + " of music" : ""),
                     juce::dontSendNotification);
+
+    juce::String h;
+    if (! anyMain)                          h = "Start here: select the track of your main pair and set its Role to Main pair (stereo track), or Main L / Main R / Main C on mono tracks.";
+    else if (analysing && ! anyPlaying)     h = anyTimeline ? "Waiting for playback: press play on a passage where everyone is heard." : "Waiting for playback (the host has not sent a timeline position yet).";
+    else if (analysing)                     h = "Analysing the music... let it run 20 seconds or more, then press Stop. Nothing is applied until you stop.";
+    else if (! anyResult)                   h = "Press Analyze, then play the music. The result stays until you press Reset analysis.";
+    hint.setText (h, juce::dontSendNotification);
+
+    stage.update (mics, scene, selected, groupFilter);
+    inspector.update (mics, scene, selected);
     table.updateContent();
     table.repaint();
 }
 
-juce::String ArrayLabEditor::cellText (const arraylab::Hub::SlotInfo& r, int column) const
+juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 {
-    const bool isRef = r.index == reference;
-    const auto& res = r.result;
-    const bool has = ! isRef && res.valid;
-
+    const bool main = isMain (m.state.role);
+    const auto delay = [&] (int r) -> juce::String
+    {
+        const auto& v = m.results.vs[r];
+        return v.valid ? juce::String (1000.0 * v.delaySamples / m.sampleRate, 3) + (v.polarity < 0 ? juce::String::fromUTF8 (" \xc3\x98") : juce::String()) : "-";
+    };
     switch (column)
     {
-        case colIndex:   return juce::String (r.index + 1);
-        case colName:    return r.name + (isRef ? "  [REF]" : "") + (r.index == proc.slot() ? "  (this)" : "")
-                                + (r.hostNamed ? "  *" : "");
-        case colIO:      return juce::String (r.numIn) + " > " + juce::String (r.numOut);
-        case colRate:    return juce::String (r.sampleRate / 1000.0, 1) + " k / " + juce::String (r.blockSize);
-        case colState:   return ! r.hasPlayhead ? (r.blocks > 0 ? "no timeline" : "idle")
-                                                : (r.playing ? "playing" : "stopped");
-        case colPos:     return r.hasPlayhead ? juce::String (r.timelinePos) : "-";
-        case colSamples: return isRef ? "0" : (has ? juce::String (res.delaySamples, 2) : "-");
-        case colMs:      return isRef ? "0" : (has ? juce::String (1000.0 * res.delaySamples / r.sampleRate, 3) : "-");
-        case colMetres:  return isRef ? "0" : (has ? juce::String (speedOfSound * res.delaySamples / r.sampleRate, 2) : "-");
-        case colPol:     return isRef ? "+" : (has ? (res.polarity < 0 ? "INVERTED" : "+") : "-");
-        case colConf:    return isRef ? "" : (res.frames > 0 ? juce::String (juce::roundToInt (res.confidence * 100.0)) + " %  (" + juce::String (res.frames) + ")" : "-");
-        default:         return {};
+        case colName:     return m.state.name + (m.index == proc.slot() ? "  (this track)" : "");
+        case colGroup:    return scene.groupNames[m.state.group];
+        case colRole:     return ui::roleNames()[(int) m.state.role].upToFirstOccurrenceOf (" (", false, false);
+        case colL:        return main ? "ref" : delay (0);
+        case colC:        return main ? "ref" : delay (1);
+        case colR:        return main ? "ref" : delay (2);
+        case colConf:     return m.results.primary >= 0 ? juce::String (juce::roundToInt (m.results.vs[m.results.primary].confidence * 100.0)) + " %" : "-";
+        case colApplied:  return main ? "-" : std::abs (m.applied.delayLms - m.applied.delayRms) > 0.005
+                                                 ? "L " + juce::String (m.applied.delayLms, 2) + " / R " + juce::String (m.applied.delayRms, 2)
+                                                 : juce::String (m.applied.delayLms, 3);
+        case colDelay:    return main ? "" : m.state.delayOn ? "ON" : "off";
+        case colPolarity: return main ? "" : m.state.polarityOn ? "ON" : "off";
+        case colPhase:    return main ? "" : m.state.phaseOn ? "ON" : "off";
+        case colIO:       return juce::String (m.numIn) + " > " + juce::String (m.numOut);
+        default:          return {};
     }
 }
 
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << header.getText() << "\n";
-    s << "#\tMic\tIn>Out\tRate/block\tTransport\tTimeline\tDelay(smp)\tms\tm\tPolarity\tConfidence\n";
-    for (auto& r : rows)
+    s << "ArrayLab 0.2 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tConfidence\tApplied\tDelay\tPolarity\tPhase\tIn>Out\tRate\tTimeline\tNote\n";
+    for (auto& m : mics)
     {
-        for (int c = colIndex; c <= colConf; ++c)
-            s << cellText (r, c) << (c == colConf ? "\n" : "\t");
+        for (int c = colName; c <= colIO; ++c)
+            s << cellText (m, c) << "\t";
+        s << juce::String (m.sampleRate / 1000.0, 1) << "k\t" << (m.hasPlayhead ? (m.playing ? "playing" : "stopped") : "no timeline") << "\t" << m.applied.note << "\n";
     }
     return s;
 }
 
-void ArrayLabEditor::paintRowBackground (juce::Graphics& g, int row, int, int, bool selected)
+void ArrayLabEditor::paintRowBackground (juce::Graphics& g, int row, int, int, bool)
 {
-    if (! juce::isPositiveAndBelow (row, rows.size())) return;
-    if (selected)                                 g.fillAll (accent.withAlpha (0.25f));
-    else if (rows[row].index == proc.slot())      g.fillAll (own);
+    if (juce::isPositiveAndBelow (row, rows.size()) && rows.getReference (row).index == selected)
+        g.fillAll (ui::accent.withAlpha (0.22f));
 }
 
 void ArrayLabEditor::paintCell (juce::Graphics& g, int row, int column, int w, int h, bool)
 {
     if (! juce::isPositiveAndBelow (row, rows.size())) return;
-    const auto& r = rows.getReference (row);
-    auto colour = text;
-    if (column == colPol && r.result.valid && r.result.polarity < 0 && r.index != reference) colour = juce::Colours::orange;
-    if (column == colConf && r.result.frames > 0)
-        colour = r.result.confidence > 0.5 ? juce::Colour (0xff6fd08c) : r.result.confidence > 0.2 ? juce::Colours::orange : juce::Colour (0xffe36a6a);
-    if (r.index == reference && column == colName) colour = accent;
+    const auto& m = rows.getReference (row);
+    const auto text = cellText (m, column);
+    auto colour = ui::text;
+    if (column == colName)  colour = ui::groupColour (m.state.group);
+    if (column == colConf && m.results.primary >= 0)
+    {
+        const double c = m.results.vs[m.results.primary].confidence;
+        colour = c > 0.5 ? ui::good : c > 0.2 ? ui::warn : ui::bad;
+    }
+    if (column >= colDelay && column <= colPhase) colour = text == "ON" ? ui::good : ui::dim;
     g.setColour (colour);
     g.setFont (juce::FontOptions (14.0f));
-    g.drawText (cellText (r, column), 6, 0, w - 8, h, juce::Justification::centredLeft, true);
+    g.drawText (text, 6, 0, w - 8, h, juce::Justification::centredLeft, true);
 }
 
-void ArrayLabEditor::cellDoubleClicked (int row, int, const juce::MouseEvent&)
+void ArrayLabEditor::cellClicked (int row, int column, const juce::MouseEvent&)
 {
-    if (juce::isPositiveAndBelow (row, rows.size()))
-        proc.hub().setReference (rows[row].index);
+    if (! juce::isPositiveAndBelow (row, rows.size())) return;
+    const int slot = rows.getReference (row).index;
+    if (column >= colDelay && column <= colPhase && ! isMain (rows.getReference (row).state.role))
+    {
+        auto m = hub.getMic (slot);
+        if (column == colDelay)    m.delayOn = ! m.delayOn;
+        if (column == colPolarity) m.polarityOn = ! m.polarityOn;
+        if (column == colPhase)    m.phaseOn = ! m.phaseOn;
+        hub.setMic (slot, m);
+    }
+    select (slot);
 }
 
-void ArrayLabEditor::paint (juce::Graphics& g) { g.fillAll (background); }
+void ArrayLabEditor::paint (juce::Graphics& g) { g.fillAll (ui::bg); }
 
 void ArrayLabEditor::resized()
 {
     auto area = getLocalBounds().reduced (10);
-    header.setBounds (area.removeFromTop (24));
-    hint.setBounds (area.removeFromTop (36));
+    auto top = area.removeFromTop (32);
+    title.setBounds (top.removeFromLeft (104));
+    analyseButton.setBounds (top.removeFromLeft (150));
+    top.removeFromLeft (6);
+    resetButton.setBounds (top.removeFromLeft (120));
+    top.removeFromLeft (12);
+    bypassButton.setBounds (top.removeFromLeft (100));
+    copyButton.setBounds (top.removeFromRight (100));
+    top.removeFromRight (10);
+    addGroupButton.setBounds (top.removeFromRight (76));
+    top.removeFromRight (6);
+    groupBox.setBounds (top.removeFromRight (140));
+    top.removeFromRight (12);
+    alignTab.setBounds (top.removeFromRight (70));
+    stageTab.setBounds (top.removeFromRight (70));
+    top.removeFromRight (10);
+    status.setBounds (top);
 
-    auto bottom = area.removeFromBottom (30);
-    area.removeFromBottom (8);
-    nameLabel.setBounds (bottom.removeFromLeft (64));
-    nameEditor.setBounds (bottom.removeFromLeft (220));
-    bottom.removeFromLeft (12);
-    delayLabel.setBounds (bottom.removeFromLeft (76));
-    delaySlider.setBounds (bottom.removeFromLeft (220));
-    invertButton.setBounds (bottom.removeFromLeft (70));
-    copyButton.setBounds (bottom.removeFromRight (100));
-    bottom.removeFromRight (6);
-    resetButton.setBounds (bottom.removeFromRight (110));
-    bottom.removeFromRight (6);
-    refButton.setBounds (bottom.removeFromRight (180));
-
+    hint.setBounds (area.removeFromTop (26));
+    area.removeFromTop (2);
+    inspector.setBounds (area.removeFromRight (330));
+    area.removeFromRight (8);
+    stage.setBounds (area);
     table.setBounds (area);
 }

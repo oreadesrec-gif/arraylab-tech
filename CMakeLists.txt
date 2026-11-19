@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ArrayLab VERSION 0.1.0 LANGUAGES C CXX)
+project(ArrayLab VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,13 +15,14 @@ FetchContent_MakeAvailable(JUCE)
 # Engine: plain C++, no JUCE, so it can be unit-tested on its own.
 add_library(arraylab_engine STATIC
     src/Fft.cpp
-    src/DelayEstimator.cpp)
+    src/DelayEstimator.cpp
+    src/PhaseFir.cpp)
 target_include_directories(arraylab_engine PUBLIC src)
 set_target_properties(arraylab_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 juce_add_plugin(ArrayLab
     COMPANY_NAME "ArrayLab"
-    PRODUCT_NAME "ArrayLab Probe"
+    PRODUCT_NAME "ArrayLab"
     PLUGIN_MANUFACTURER_CODE Arlb
     PLUGIN_CODE Alp1
     FORMATS VST3
@@ -34,7 +35,9 @@ juce_add_plugin(ArrayLab
 target_sources(ArrayLab PRIVATE
     src/Hub.cpp
     src/PluginProcessor.cpp
-    src/PluginEditor.cpp)
+    src/PluginEditor.cpp
+    src/StageView.cpp
+    src/Inspector.cpp)
 
 target_compile_definitions(ArrayLab PUBLIC
     JUCE_WEB_BROWSER=0

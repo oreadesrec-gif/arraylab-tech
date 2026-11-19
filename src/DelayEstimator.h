@@ -1,11 +1,12 @@
 #pragma once
 #include "Fft.h"
+#include "Scene.h"
 #include <complex>
 #include <vector>
 
 namespace arraylab
 {
-/** Result of comparing one microphone against the reference. */
+/** Result of comparing one microphone against a reference. */
 struct DelayResult
 {
     bool   valid = false;
@@ -42,11 +43,17 @@ public:
     void reset (int frameSize);
     void accumulate (const FrameSpectrum& reference, const FrameSpectrum& target);
     DelayResult estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& scratch) const;
+
+    /** Phase left over in each band once `delaySamples` and `polarity` are
+        compensated. Each value's angle is the residual phase of the target
+        against the reference; its length (0..1) says how far to trust it. */
+    void phaseBands (double sampleRate, double delaySamples, int polarity, std::complex<float>* bands) const;
+
     int frames() const noexcept { return numFrames; }
 
 private:
     int n = 0, numFrames = 0;
-    std::vector<std::complex<double>> sxy;
-    std::vector<double> sxx, syy;
+    std::vector<std::complex<float>> sxy;
+    std::vector<float> sxx, syy;
 };
 }
