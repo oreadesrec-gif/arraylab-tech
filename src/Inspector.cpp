@@ -205,7 +205,7 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
         if (! v.valid) continue;
         const double msec = 1000.0 * v.delaySamples / info->sampleRate;
         meas << tags[r] << "   " << juce::String (msec, 3) << " ms   " << juce::String (std::abs (speedOfSound (scene.tempC) * msec * 0.001), 2)
-             << " m   " << (v.polarity < 0 ? "inverted" : "in phase") << "   " << juce::roundToInt (v.confidence * 100.0) << " %\n";
+             << " m   " << (v.polarity < 0 ? "inverted   " : "") << juce::roundToInt (v.confidence * 100.0) << " %\n";
     }
     measured->setText (main ? "This is a reference microphone" : meas.isEmpty() ? "Nothing yet. Press Analyze, then play." : meas.trimEnd(), juce::dontSendNotification);
 
