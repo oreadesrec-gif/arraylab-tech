@@ -29,7 +29,7 @@ private:
     int arrayGroupOf (int group) const;
     void drawMic (juce::Graphics&, juce::Point<float>, double axisDeg, arraylab::Pattern, juce::Colour,
                   const juce::String& label, const juce::String& sub, bool selected, bool handle);
-    void drawLabel (juce::Graphics&, juce::Point<float>, const juce::String& label, const juce::String& sub, bool selected);
+    void drawLabel (juce::Graphics&, juce::Point<float>, const juce::String& label, const juce::String& sub, bool selected, bool above);
 
     arraylab::Hub& hub;
     juce::Array<arraylab::MicInfo> mics;

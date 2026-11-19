@@ -3,7 +3,7 @@
 Time and phase alignment of spot, outrigger and ambience microphones against a
 main pair or Decca tree, measured on the music itself. VST3, aimed at Pyramix.
 
-## Status: 0.2
+## Status: 0.3
 
 One instance per track, one shared window.
 
@@ -22,7 +22,13 @@ One instance per track, one shared window.
   so its own image is kept.
 - **Groups**: up to eight, each with its own main array as reference, or
   following the Main group when it has none.
-- **Align**: the same data as a table, with one-click bypass switches.
+- **Align**: the same data as a table, with one-click bypass switches
+  (delay, polarity, phase, pan).
+- **Check**: while the music plays, the sum of the microphones as recorded
+  against the sum with the corrections, by frequency, with a plain verdict:
+  do the corrections make the sum fuller or thinner? For everything, or for
+  the main array plus one microphone.
+- **Colours**: each microphone can take its own colour.
 
 Not yet tried in Pyramix by the author: host behaviour (mono-to-stereo inserts,
 timeline reporting) still needs confirming there.

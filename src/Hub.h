@@ -33,6 +33,8 @@ struct MicState
 
     // A spot on a stereo track is a pair: its two capsules sit either side of x/y, aimed around angleDeg.
     double pairSpacingCm = 17.0, pairAngleDeg = 110.0;
+
+    int colour = -1;                    // index in the palette, or -1 to follow the group's colour
 };
 
 /** What the analysis measured for one microphone. Index 0 = vs L, 1 = vs C, 2 = vs R. */
@@ -81,6 +83,21 @@ struct MicInfo
     bool hasPlayhead = false, playing = false;
 
     bool isStereoPair() const noexcept { return numIn == 2 && ! state.monoSource && ! isMain (state.role); }
+    /** Only a mono source feeding a stereo output can be panned by the plugin. */
+    bool canPan() const noexcept       { return numOut == 2 && (numIn == 1 || state.monoSource) && ! isMain (state.role); }
+};
+
+/** How the microphones add up, with and without the corrections. Levels are those
+    reaching the plugins (before the mixer's faders). */
+struct CheckData
+{
+    static constexpr int numBands = 64;
+    static constexpr double low = 30.0, high = 18000.0;
+    bool valid = false;
+    float before[numBands] {}, after[numBands] {};   // dB, summed to mono
+    double gainAll = 0.0, gainLow = 0.0, gainMid = 0.0, gainHigh = 0.0; // after minus before, dB
+    bool hasCorrelation = false;                     // only when one microphone is in focus
+    double correlationBefore = 0.0, correlationAfter = 0.0;
 };
 
 /** Session-wide settings shared by every instance. */
@@ -111,6 +128,7 @@ public:
     {
         std::atomic<int> delayL { 0 }, delayR { 0 };       // samples
         std::atomic<float> gainL { 1.0f }, gainR { 1.0f }; // polarity included
+        std::atomic<float> bypassGainL { 1.0f }, bypassGainR { 1.0f };
         std::atomic<bool> phaseOn { false }, fromMono { false };
     };
 
@@ -149,6 +167,11 @@ public:
     bool isAnalysing() const noexcept                 { return analysing.load(); }
     double analysedSeconds() const noexcept           { return analysedTime.load(); }
     void placeFromAnalysis (int slot);
+
+    // Check: compare the sum of the microphones with and without corrections.
+    // focusSlot < 0 sums everything; otherwise the main array plus that one microphone.
+    void setCheck (bool active, int focusSlot)        { checkActive = active; checkFocus = focusSlot; }
+    CheckData getCheck() const;
 
     // Persistence.
     juce::ValueTree saveInstance (int slot) const;
@@ -189,6 +212,8 @@ private:
 
     void run() override;
     void analyse();
+    void check();
+    bool prepareFrame (double sampleRate);
     bool readFrame (Slot&, int channel, juce::int64 start, int length, float* dest);
     RefSet refsForGroup (int group, int* arrayGroup = nullptr) const; // stateLock held
     void recompute (int slot);                                        // stateLock held
@@ -200,6 +225,8 @@ private:
     Scene scene;
     std::atomic<bool> analysing { false }, resetRequested { false }, bypassAll { false };
     std::atomic<double> analysedTime { 0.0 };
+    std::atomic<bool> checkActive { false };
+    std::atomic<int> checkFocus { -1 };
     std::atomic<int> changes { 0 };
 
     // analysis thread state
@@ -211,5 +238,14 @@ private:
     std::vector<RefSpectrum> refSpectra;
     std::vector<float> frame;
     std::vector<std::complex<float>> scratch;
+
+    // check state (analysis thread, results under stateLock)
+    CheckData checkData;
+    std::vector<std::complex<float>> sumBefore, sumAfter, sumMain, focusBefore, focusAfter;
+    double bandBefore[CheckData::numBands] {}, bandAfter[CheckData::numBands] {};
+    double corrState[5] {};
+    juce::int64 checkPos = -1;
+    int checkedFocus = -2;
+    bool checkPrimed = false;
 };
 }

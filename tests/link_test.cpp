@@ -200,10 +200,21 @@ int main()
         check (std::hypot (m.state.x - sources[s].x, m.state.y - sources[s].y) < (s == 2 ? 0.8 : 0.3), m.state.name + ": placed on the plan");
     }
 
-    // Now listen to the result.
+    // Now listen to the result, with the sum check running as the Check view would.
+    hub.setCheck (true, -1);
     record = true;
     run (4.0);
     record = false;
+    const auto all = hub.getCheck();
+    hub.setCheck (true, spot[0].slot());
+    run (3.0);
+    const auto one = hub.getCheck();
+    hub.setCheck (false, -1);
+    std::printf ("  sum of all mics: %+.1f dB with corrections (lows %+.1f, mids %+.1f, highs %+.1f)\n", all.gainAll, all.gainLow, all.gainMid, all.gainHigh);
+    std::printf ("  main + spot 1: %+.1f dB, correlation %.2f -> %.2f\n", one.gainAll, one.correlationBefore, one.correlationAfter);
+    // The gain shows in the lows; higher up, the main pair's own L-R spacing limits what a mono fold can add.
+    check (all.valid && all.gainLow > 1.5 && all.gainAll > 0.3, "check: aligned microphones add up fuller");
+    check (one.valid && one.hasCorrelation && one.correlationAfter > one.correlationBefore + 0.3, "check: spot 1 correlates with the main array once aligned");
     const auto info = hub.snapshot();
     const auto gainOf = [&] (int s, bool right) { for (auto& m : info) if (m.index == spot[s].slot()) return right ? m.applied.gainR : m.applied.gainL; return 1.0f; };
     const auto tail = [] (std::vector<float> v) { return std::vector<float> (v.end() - 48000, v.end()); };

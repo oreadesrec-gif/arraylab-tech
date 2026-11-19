@@ -255,10 +255,19 @@ void Hub::recompute (int slot)
     const bool pair = numIn == 2 && ! m.monoSource;
     const DelayResult vs[3] = { combinedResult (res, 0, pair), combinedResult (res, 1, pair), combinedResult (res, 2, pair) };
 
+    float bypassL = fromMono ? 0.70710678f : 1.0f, bypassR = bypassL;
+
     if (isMain (m.role))
     {
         a.isReference = true;
         a.note = "Reference: left untouched";
+        if (fromMono) // a mono main mic on a stereo output goes to its own side
+        {
+            gL = m.role == Role::mainL ? 1.0f : m.role == Role::mainR ? 0.0f : 0.70710678f;
+            gR = m.role == Role::mainR ? 1.0f : m.role == Role::mainL ? 0.0f : 0.70710678f;
+            bypassL = gL;
+            bypassR = gR;
+        }
     }
     else if (sr > 0.0)
     {
@@ -344,6 +353,8 @@ void Hub::recompute (int slot)
     s.live.delayR = iR;
     s.live.gainL = gL * (float) a.polarity;
     s.live.gainR = gR * (float) a.polarity;
+    s.live.bypassGainL = bypassL;
+    s.live.bypassGainR = bypassR;
     s.live.fromMono = fromMono;
     s.live.phaseOn = phase;
 }
@@ -458,8 +469,182 @@ void Hub::run()
     while (! threadShouldExit())
     {
         analyse();
+        check();
         wait (100);
     }
+}
+
+bool Hub::prepareFrame (double sr)
+{
+    const int wanted = juce::nextPowerOfTwo ((int) (sr * 0.5));
+    if (wanted == frameSize)
+        return false;
+    frameSize = wanted;
+    fft = std::make_unique<Fft> (frameSize);
+    tgtSpectrum = std::make_unique<FrameSpectrum> (frameSize);
+    refSpectra.clear();
+    frame.assign ((size_t) frameSize, 0.0f);
+    for (auto& s : slots)
+        s.resetEstimators (frameSize);
+    framePos = -1;
+    checkPos = -1;
+    return true;
+}
+
+CheckData Hub::getCheck() const
+{
+    const juce::ScopedLock l (stateLock);
+    return checkData;
+}
+
+/** Adds the microphones up twice, as they arrive and as they leave the plugins,
+    so the user can see whether the corrections make the sum fuller or thinner. */
+void Hub::check()
+{
+    const juce::ScopedLock al (analysisLock);
+    if (! checkActive.load())
+    {
+        if (checkPrimed) { checkPrimed = false; const juce::ScopedLock l (stateLock); checkData = {}; }
+        return;
+    }
+
+    struct Entry
+    {
+        int slot; bool main, stereo, fromMono, phase;
+        int dL, dR; float gL, gR, bL, bR; int half;
+        std::array<std::complex<float>, kNumBands> bands;
+    };
+    std::vector<Entry> entries;
+    const int focus = checkFocus.load();
+    const bool bypass = bypassAll.load();
+    int clock = -1;
+    {
+        const juce::ScopedLock l (stateLock);
+        for (int i = 0; i < maxSlots; ++i)
+        {
+            auto& s = slots[(size_t) i];
+            if (! s.active.load() || s.numIn.load() > 2 || s.numOut.load() > 2) continue;
+            if (clock < 0 && s.playing.load() && s.sampleRate.load() > 0.0) clock = i;
+            const bool main = isMain (s.state.role);
+            if (focus >= 0 && ! main && i != focus) continue;
+            Entry e;
+            e.slot = i; e.main = main;
+            e.fromMono = s.live.fromMono.load();
+            e.stereo = s.numIn.load() == 2 && ! e.fromMono;
+            e.phase = s.live.phaseOn.load();
+            e.dL = s.live.delayL.load(); e.dR = s.live.delayR.load();
+            e.gL = s.live.gainL.load();  e.gR = s.live.gainR.load();
+            e.bL = s.live.bypassGainL.load(); e.bR = s.live.bypassGainR.load();
+            e.half = e.phase ? s.applied.phaseTaps / 2 : 0;
+            e.bands = s.results.phase;
+            if (s.numOut.load() == 1) { e.gR = 0.0f; e.bR = 0.0f; }
+            entries.push_back (e);
+        }
+    }
+    if (clock < 0 || entries.empty())
+        return;
+
+    auto& ck = slots[(size_t) clock];
+    const double sr = ck.sampleRate.load();
+    prepareFrame (sr);
+    const int n = frameSize, bins = n / 2 + 1;
+    const auto pos = ck.writeEnd.load() - (juce::int64) (sr * 0.1) - n;
+    if (pos < ck.runStart.load() || (checkPos >= 0 && std::abs (pos - checkPos) < n / 2))
+        return;
+    checkPos = pos;
+
+    for (auto* v : { &sumBefore, &sumAfter, &sumMain, &focusBefore, &focusAfter })
+        v->assign ((size_t) bins, {});
+
+    for (auto& e : entries)
+    {
+        for (int ch = 0; ch < (e.stereo ? 2 : 1); ++ch)
+        {
+            if (! readFrame (slots[(size_t) e.slot], ch, pos, n, frame.data())) continue;
+            tgtSpectrum->compute (*fft, frame.data());
+            const auto& x = tgtSpectrum->bins();
+
+            // Mono fold-down of what this channel sends out, bypassed and corrected.
+            const float gBefore = e.stereo ? (ch == 0 ? e.bL : e.bR) : e.bL + e.bR;
+            const auto stepL = std::polar (1.0, -2.0 * kPi * (e.dL + e.half) / n);
+            const auto stepR = std::polar (1.0, -2.0 * kPi * (e.dR + e.half) / n);
+            std::complex<double> rotL (1.0, 0.0), rotR (1.0, 0.0);
+            for (int k = 0; k < bins; ++k)
+            {
+                const std::complex<double> xk (x[(size_t) k]);
+                const auto before = xk * (double) gBefore;
+                std::complex<double> after;
+                if (bypass)          after = before;
+                else
+                {
+                    after = e.stereo ? xk * (ch == 0 ? (double) e.gL * rotL : (double) e.gR * rotR)
+                                     : xk * ((double) e.gL * rotL + (double) e.gR * rotR);
+                    if (e.phase)     after *= std::polar (1.0, -residualPhaseAt (e.bands.data(), k * sr / n));
+                }
+                sumBefore[(size_t) k] += std::complex<float> (before);
+                sumAfter[(size_t) k] += std::complex<float> (after);
+                if (e.main)                   sumMain[(size_t) k] += std::complex<float> (before);
+                else if (e.slot == focus)   { focusBefore[(size_t) k] += std::complex<float> (before); focusAfter[(size_t) k] += std::complex<float> (after); }
+                rotL *= stepL;
+                rotR *= stepR;
+            }
+        }
+    }
+
+    // Fold into display bands and smooth over a few frames.
+    if (checkedFocus != focus || ! checkPrimed)
+    {
+        for (auto& b : bandBefore) b = 0.0;
+        for (auto& b : bandAfter) b = 0.0;
+        for (auto& c : corrState) c = 0.0;
+        checkedFocus = focus;
+    }
+    double pb[CheckData::numBands] {}, pa[CheckData::numBands] {}, corr[5] {};
+    const double span = std::log (CheckData::high / CheckData::low);
+    for (int k = 1; k < bins - 1; ++k)
+    {
+        const double f = k * sr / n;
+        if (f < CheckData::low || f >= CheckData::high) continue;
+        const int b = juce::jlimit (0, CheckData::numBands - 1, (int) (std::log (f / CheckData::low) / span * CheckData::numBands));
+        pb[b] += std::norm (sumBefore[(size_t) k]);
+        pa[b] += std::norm (sumAfter[(size_t) k]);
+        corr[0] += (std::complex<double> (sumMain[(size_t) k]) * std::conj (std::complex<double> (focusBefore[(size_t) k]))).real();
+        corr[1] += (std::complex<double> (sumMain[(size_t) k]) * std::conj (std::complex<double> (focusAfter[(size_t) k]))).real();
+        corr[2] += std::norm (sumMain[(size_t) k]);
+        corr[3] += std::norm (focusBefore[(size_t) k]);
+        corr[4] += std::norm (focusAfter[(size_t) k]);
+    }
+    const double mix = checkPrimed && bandBefore[CheckData::numBands / 2] > 0.0 ? 0.25 : 1.0;
+    for (int b = 0; b < CheckData::numBands; ++b)
+    {
+        bandBefore[b] += mix * (pb[b] - bandBefore[b]);
+        bandAfter[b] += mix * (pa[b] - bandAfter[b]);
+    }
+    for (int i = 0; i < 5; ++i) corrState[i] += mix * (corr[i] - corrState[i]);
+    checkPrimed = true;
+
+    CheckData d;
+    d.valid = true;
+    double tot[2][4] {};
+    for (int b = 0; b < CheckData::numBands; ++b)
+    {
+        const double f = CheckData::low * std::exp (span * (b + 0.5) / CheckData::numBands);
+        const int zone = f < 250.0 ? 1 : f < 2000.0 ? 2 : 3;
+        tot[0][0] += bandBefore[b]; tot[1][0] += bandAfter[b];
+        tot[0][zone] += bandBefore[b]; tot[1][zone] += bandAfter[b];
+        d.before[b] = (float) (10.0 * std::log10 (bandBefore[b] + 1e-12));
+        d.after[b] = (float) (10.0 * std::log10 (bandAfter[b] + 1e-12));
+    }
+    const auto gain = [&] (int z) { return 10.0 * std::log10 ((tot[1][z] + 1e-12) / (tot[0][z] + 1e-12)); };
+    d.gainAll = gain (0); d.gainLow = gain (1); d.gainMid = gain (2); d.gainHigh = gain (3);
+    if (focus >= 0 && corrState[2] > 0.0 && corrState[3] > 0.0)
+    {
+        d.hasCorrelation = true;
+        d.correlationBefore = corrState[0] / std::sqrt (corrState[2] * corrState[3]);
+        d.correlationAfter = corrState[1] / std::sqrt (corrState[2] * juce::jmax (1e-30, corrState[4]));
+    }
+    const juce::ScopedLock l (stateLock);
+    checkData = d;
 }
 
 void Hub::analyse()
@@ -496,18 +681,7 @@ void Hub::analyse()
 
     auto& ck = slots[(size_t) clock];
     const double sr = ck.sampleRate.load();
-    const int wanted = juce::nextPowerOfTwo ((int) (sr * 0.5));
-    if (wanted != frameSize)
-    {
-        frameSize = wanted;
-        fft = std::make_unique<Fft> (frameSize);
-        tgtSpectrum = std::make_unique<FrameSpectrum> (frameSize);
-        refSpectra.clear();
-        frame.assign ((size_t) frameSize, 0.0f);
-        for (auto& s : slots)
-            s.resetEstimators (frameSize);
-        framePos = -1;
-    }
+    prepareFrame (sr);
 
     // Leave a little room so instances processed later in the host cycle have caught up.
     const auto guard = (juce::int64) (sr * 0.1);
@@ -639,6 +813,7 @@ juce::ValueTree Hub::saveInstance (int slot) const
     mic.setProperty ("panOn", m.panOn, nullptr);      mic.setProperty ("panAmount", m.panAmount, nullptr);
     mic.setProperty ("timePan", m.timePan, nullptr);  mic.setProperty ("monoSource", m.monoSource, nullptr);
     mic.setProperty ("pairSpacing", m.pairSpacingCm, nullptr); mic.setProperty ("pairAngle", m.pairAngleDeg, nullptr);
+    mic.setProperty ("colour", m.colour, nullptr);
     t.addChild (mic, -1, nullptr);
 
     juce::ValueTree res ("Results");
@@ -702,6 +877,7 @@ void Hub::restoreInstance (int slot, const juce::ValueTree& t)
         m.panOn = mic.getProperty ("panOn", true);       m.panAmount = mic.getProperty ("panAmount", 1.0);
         m.timePan = mic.getProperty ("timePan", 1.0);    m.monoSource = mic.getProperty ("monoSource", false);
         m.pairSpacingCm = mic.getProperty ("pairSpacing", 17.0); m.pairAngleDeg = mic.getProperty ("pairAngle", 110.0);
+        m.colour = juce::jlimit (-1, 9, (int) mic.getProperty ("colour", -1));
     }
 
     if (auto res = t.getChildWithName ("Results"); res.isValid())

@@ -2,6 +2,7 @@
 #include "PluginProcessor.h"
 #include "StageView.h"
 #include "Inspector.h"
+#include "CheckView.h"
 
 class ArrayLabEditor : public juce::AudioProcessorEditor,
                        private juce::TableListBoxModel,
@@ -22,7 +23,7 @@ private:
     void timerCallback() override;
 
     void select (int slot);
-    void showStage (bool);
+    void showView (int);
     juce::String cellText (const arraylab::MicInfo&, int column) const;
     juce::String buildReport() const;
 
@@ -34,12 +35,14 @@ private:
     int selected = -1, groupFilter = -1;
 
     juce::Label title { {}, "ArrayLab" }, status, hint;
-    juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Align" },
+    juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Align" }, checkTab { "Check" },
                      addGroupButton { "+ Group" }, copyButton { "Copy report" };
     juce::ToggleButton bypassButton { "Bypass all" };
     juce::ComboBox groupBox;
     StageView stage;
     Inspector inspector;
+    CheckView checkView;
+    int view = 0;
     juce::TableListBox table { "mics", this };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ArrayLabEditor)

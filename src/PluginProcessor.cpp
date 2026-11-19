@@ -80,8 +80,8 @@ void ArrayLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int dR = bypass ? 0 : juce::jlimit (0, limit, live.delayR.load());
     tap[0].setTarget (dL);
     tap[1].setTarget (dR);
-    gain[0].setTargetValue (bypass ? (fromMono ? 0.70710678f : 1.0f) : live.gainL.load());
-    gain[1].setTargetValue (bypass ? (fromMono ? 0.70710678f : 1.0f) : live.gainR.load());
+    gain[0].setTargetValue (bypass ? live.bypassGainL.load() : live.gainL.load());
+    gain[1].setTargetValue (bypass ? live.bypassGainR.load() : live.gainR.load());
 
     // Multiband phase correction (its latency is already taken out of the delays).
     {
