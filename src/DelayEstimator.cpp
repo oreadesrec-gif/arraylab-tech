@@ -309,7 +309,7 @@ void DelayEstimator::transfer (double sampleRate, double delaySamples, int polar
     }
 }
 
-double DelayEstimator::sumGain (double sampleRate, double lag, int polarity, double rotation, bool limit, double lowHz, double highHz) const
+double DelayEstimator::sumGain (double sampleRate, double lag, int polarity, double rotation, bool limit, double lowHz, double highHz, double level) const
 {
     if (numFrames == 0 || sxy.empty())
         return 0.0;
@@ -326,13 +326,13 @@ double DelayEstimator::sumGain (double sampleRate, double lag, int polarity, dou
             continue;
         // Power of the sum over the power of the two taken separately: 1 + 2 Re(cross) / (xx + yy).
         const double shared = limit ? std::abs (cross) : (cross * turn).real();
-        total += 10.0 * std::log10 (std::max (0.05, 1.0 + 2.0 * shared / (xx + yy)));
+        total += 10.0 * std::log10 (std::max (0.05, 1.0 + 2.0 * level * shared / (xx + level * level * yy)));
         ++count;
     }
     return count > 0 ? total / count : 0.0;
 }
 
-std::complex<double> DelayEstimator::sumVector (double sampleRate, double lag, int polarity, double lowHz, double highHz) const
+std::complex<double> DelayEstimator::sumVector (double sampleRate, double lag, int polarity, double lowHz, double highHz, double level) const
 {
     std::complex<double> total {};
     if (numFrames == 0 || sxy.empty())
@@ -344,7 +344,7 @@ std::complex<double> DelayEstimator::sumVector (double sampleRate, double lag, i
         double xx, yy;
         int bins;
         if (f >= lowHz && f <= highHz && band (b, sampleRate, lag, cross, xx, yy, bins))
-            total += cross * (double) polarity / (xx + yy);
+            total += cross * ((double) polarity * level) / (xx + level * level * yy);
     }
     return total;
 }

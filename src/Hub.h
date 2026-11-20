@@ -24,6 +24,9 @@ struct MicState
     bool manualPosition = false;        // true once the user has dragged or typed a position
 
     // Alignment.
+    bool enabled = true;                // the strip's own on/off: off, the microphone is left as recorded
+    bool flip = false;                  // polarity turned over by hand, on top of what the analysis decides
+    double mixLevelDb = 0.0;            // this microphone's level in the mix against the main array
     AlignTo alignTo = AlignTo::best;
     bool delayOn = true, polarityOn = true, phaseOn = false;
     double offsetMs = 0.0;              // added after alignment (lets the main pair lead)
@@ -84,6 +87,8 @@ struct MicResults
     PhaseCurve curve[kNumRefs];
     ZoneDelays zones[kNumRefs];
     float phaseTrim[kFineBands] {};     // extra phase found by refining against the whole sum
+    int stabilityWindows = 0;           // the delay re-measured on successive stretches of music...
+    double stabilitySpread = 0.0;       // ...and how much it moved between them, in samples
 
     bool any() const noexcept { for (auto& v : vs) if (v.valid) return true; return false; }
 };
@@ -171,6 +176,8 @@ struct Scene
     double tempC = 20.0;
     int panLaw = 0;     // 0: -3 dB, 1: -4.5 dB, 2: -6 dB
     int precision = 0;  // 0: live, no latency. 1: full-resolution phase, latency reported to the host
+    double leadMs = 0.0; // every lined-up microphone arrives this long after the main array
+    int snapshot = 0;    // which of the three settings snapshots (A, B, C) is in use
     juce::int64 stamp = 0;
 };
 
@@ -194,7 +201,7 @@ public:
         std::atomic<float> bypassGainL { 1.0f }, bypassGainR { 1.0f };
         std::atomic<float> crossLR { 0.0f }, crossRL { 0.0f }; // stereo pair being panned: left into right, right into left
         std::atomic<int> bypassDelay { 0 };                  // the session latency alone
-        std::atomic<bool> phaseOn { false }, fromMono { false };
+        std::atomic<bool> phaseOn { false }, fromMono { false }, isMain { false };
     };
 
     using FirSink = std::function<void (const std::vector<float>&)>;
@@ -229,6 +236,14 @@ public:
     void setBypassed (bool b)                         { bypassAll = b; ++changes; }
     void setMatchLevel (bool b)                       { matchOn = b; ++changes; }
     void setAllLocked (bool locked);
+
+    /** Solo in context: only this microphone and the main arrays are heard (-1: everything). */
+    void setSolo (int slot)                           { soloSlot = slot; ++changes; }
+    int solo() const noexcept                         { return soloSlot.load(); }
+
+    /** Three complete sets of alignment settings (A, B, C) to compare. */
+    void recallSnapshot (int index);
+    int activeShot() const noexcept                   { return activeSnapshot.load(); }
     /** Links two microphones as the two halves of a pair; other < 0 unlinks. */
     void linkMics (int slot, int other);
     bool matchLevel() const noexcept                  { return matchOn.load(); }
@@ -280,6 +295,8 @@ private:
         MicResults results;
         MicApplied applied;
         FirSink sink;
+        MicState shots[3];
+        bool hasShot[3] {};
         int firLength = 0;
         juce::int64 firSignature = 0;
         double alignL = 0.0, alignR = 0.0; // alignment delays alone, in samples, for the sum check
@@ -288,10 +305,17 @@ private:
         DelayEstimator estimator[kNumRefs], estimatorRight[kNumRefs];
         int estimatorRef[kNumRefs] { -1, -1, -1, -1 };
         int readFrames = -1;
+        DelayEstimator shortTerm; // restarted every few seconds, to see whether the delay holds
+        int shortTermRef = -1;
+        std::vector<float> history;
+        std::atomic<bool> rereadRequested { false };
         void resetEstimators (int frameSize)
         {
             for (int r = 0; r < kNumRefs; ++r) { estimator[r].reset (frameSize); estimatorRight[r].reset (frameSize); estimatorRef[r] = -1; }
             readFrames = -1;
+            shortTerm.reset (frameSize);
+            shortTermRef = -1;
+            history.clear();
         }
     };
 
@@ -303,13 +327,14 @@ private:
         int group = 0;
         int key (int r) const { return r == 3 ? 2 * maxSlots + group : slot[r] * 2 + channel[r]; }
     };
-    struct Target { int slot; RefSet refs; bool pair; Role role; };
+    struct Target { int slot; RefSet refs; bool pair; Role role; double level; };
 
     void run() override;
     void analyse();
     void readout (const Target&, double sampleRate);
     void findBest (const Target&, double sampleRate, DelayResult* left, DelayResult* right, Benefit& best);
     void detail();
+    void reread();
     void check();
     bool prepareFrame (double sampleRate);
     bool readFrame (Slot&, int channel, juce::int64 start, int length, float* dest);
@@ -326,7 +351,7 @@ private:
     Scene scene;
     std::atomic<bool> analysing { false }, resetRequested { false }, bypassAll { false }, matchOn { false };
     std::atomic<float> matchGain { 1.0f };
-    std::atomic<int> precisionMode { 0 };
+    std::atomic<int> precisionMode { 0 }, soloSlot { -1 }, activeSnapshot { 0 };
     std::atomic<double> analysedTime { 0.0 };
     std::atomic<bool> checkActive { false };
     std::atomic<int> checkFocus { -1 }, detailSlot { -1 }, detailRef { 0 }, refinePassesLeft { 0 }, refinePassesTotal { 0 };

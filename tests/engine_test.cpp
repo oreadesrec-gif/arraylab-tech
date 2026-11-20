@@ -307,8 +307,9 @@ static bool gainCase (const Fft& fft)
     feed (stranger, fft, ref, programme (len, 41));
     const double lined = same.sumGain (kRate, 0.0, 1), inverted = same.sumGain (kRate, 0.0, -1), quarter = same.sumGain (kRate, 0.0, 1, kPi / 2.0);
     const double offBy10ms = late.sumGain (kRate, 0.0, 1), fixed = late.sumGain (kRate, 480.0, 1), nothing = stranger.sumGain (kRate, 0.0, 1);
+    const double quiet = same.sumGain (kRate, 0.0, 1, 0.0, false, 63.0, 4000.0, 0.25); // 12 dB down in the mix: less to gain
     const bool ok = std::abs (lined - 3.01) < 0.02 && inverted < -10.0 && std::abs (quarter) < 0.05
-                    && offBy10ms < 0.0 && offBy10ms > -3.5 && std::abs (fixed - 3.01) < 0.05 && std::abs (nothing) < 0.1; // off by 10 ms: a comb, thinner than nothing in common
+                    && std::abs (quiet - 1.675) < 0.02 && offBy10ms < 0.0 && offBy10ms > -3.5 && std::abs (fixed - 3.01) < 0.05 && std::abs (nothing) < 0.1; // off by 10 ms: a comb, thinner than nothing in common
     return report ("gain of the sum, the yardstick", ok, "lined up %+.2f dB, inverted %+.1f, turned 90 deg %+.2f, 10 ms off %+.2f, then fixed %+.2f, unrelated %+.2f",
                    lined, inverted, quarter, offBy10ms, fixed, nothing);
 }

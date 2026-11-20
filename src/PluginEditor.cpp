@@ -16,7 +16,7 @@ juce::String timeText (double seconds)
 }
 
 ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
-    : AudioProcessorEditor (p), proc (p), hub (p.hub()), stage (p.hub()), inspector (p.hub()), detailView (p.hub())
+    : AudioProcessorEditor (p), proc (p), hub (p.hub()), stage (p.hub()), inspector (p.hub()), detailView (p.hub()), stripView (p.hub())
 {
     setLookAndFeel (&look);
     selected = proc.slot();
@@ -25,10 +25,11 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     title.setColour (juce::Label::textColourId, ui::text);
     status.setColour (juce::Label::textColourId, ui::dim);
     status.setFont (juce::FontOptions (13.0f));
+    status.setJustificationType (juce::Justification::centredRight);
     hint.setColour (juce::Label::textColourId, ui::warn);
     hint.setFont (juce::FontOptions (13.5f));
     for (auto* c : { (juce::Component*) &title, (juce::Component*) &status, (juce::Component*) &hint, (juce::Component*) &analyseButton,
-                     (juce::Component*) &resetButton, (juce::Component*) &stageTab, (juce::Component*) &alignTab, (juce::Component*) &checkTab, (juce::Component*) &checkView, (juce::Component*) &detailTab, (juce::Component*) &detailView, (juce::Component*) &addGroupButton,
+                     (juce::Component*) &resetButton, (juce::Component*) &stageTab, (juce::Component*) &alignTab, (juce::Component*) &checkTab, (juce::Component*) &checkView, (juce::Component*) &detailTab, (juce::Component*) &detailView, (juce::Component*) &stripView, (juce::Component*) &exportButton, (juce::Component*) &addGroupButton,
                      (juce::Component*) &copyButton, (juce::Component*) &lockButton, (juce::Component*) &bypassButton, (juce::Component*) &groupBox,
                      (juce::Component*) &stage, (juce::Component*) &inspector, (juce::Component*) &table })
         addAndMakeVisible (c);
@@ -62,9 +63,34 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     checkView.onRefine = [this] { hub.startRefine(); };
     checkView.onClearRefine = [this] { hub.clearRefine(); };
     checkView.onMatch = [this] (bool on) { hub.setMatchLevel (on); };
-    stageTab.setToggleState (true, juce::dontSendNotification);
+    alignTab.setToggleState (true, juce::dontSendNotification);
 
     stage.onSelect = [this] (int slot) { select (slot); };
+    stripView.onSelect = [this] (int slot) { if (slot != selected) select (slot); };
+
+    // A, B, C: three complete sets of settings to compare by ear.
+    for (int i = 0; i < 3; ++i)
+    {
+        auto& b = shotButtons[i];
+        b.setClickingTogglesState (true);
+        b.setRadioGroupId (21);
+        b.setColour (juce::TextButton::buttonOnColourId, ui::warn.darker (0.3f));
+        b.setConnectedEdges ((i > 0 ? juce::Button::ConnectedOnLeft : 0) | (i < 2 ? juce::Button::ConnectedOnRight : 0));
+        b.onClick = [this, i] { hub.recallSnapshot (i); timerCallback(); };
+        addAndMakeVisible (b);
+    }
+
+    exportButton.onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Save the session sheet", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("ArrayLab session.txt"), "*.txt");
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [this] (const juce::FileChooser& fc)
+                              {
+                                  if (const auto file = fc.getResult(); file != juce::File())
+                                      file.replaceWithText (buildReport());
+                              });
+    };
+    setWantsKeyboardFocus (true);
 
     auto& h = table.getHeader();
     h.addColumn ("Mic", colName, 120);
@@ -86,10 +112,12 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     table.setVisible (false);
     checkView.setVisible (false);
     detailView.setVisible (false);
+    stage.setVisible (false);
+    view = 1; // the strips are the working view
 
     setResizable (true, true);
-    setResizeLimits (980, 560, 2400, 1600);
-    setSize (1280, 800);
+    setResizeLimits (1280, 560, 2600, 1800);
+    setSize (1360, 800);
     startTimerHz (10);
     timerCallback();
 }
@@ -112,7 +140,7 @@ void ArrayLabEditor::showView (int which)
 {
     view = which;
     stage.setVisible (which == 0);
-    table.setVisible (which == 1);
+    stripView.setVisible (which == 1);
     checkView.setVisible (which == 2);
     detailView.setVisible (which == 3);
     timerCallback();
@@ -181,6 +209,10 @@ void ArrayLabEditor::timerCallback()
     if (view == 3)
         detailView.update (shown, scene, hub.getDetail());
 
+    for (int i = 0; i < 3; ++i) shotButtons[i].setToggleState (hub.activeShot() == i, juce::dontSendNotification);
+    if (view == 1)
+        stripView.update (mics, scene, selected, groupFilter);
+
     stage.update (mics, scene, selected, groupFilter);
     inspector.update (mics, scene, selected);
     table.updateContent();
@@ -222,7 +254,7 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << "ArrayLab 0.6 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "ArrayLab 0.7 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
     s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tSure\tTo gain\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
     for (auto& m : mics)
     {
@@ -240,7 +272,7 @@ juce::String ArrayLabEditor::buildReport() const
         }
         if (const auto& b = m.results.best; ! main (m) && b.valid)
             s << "\tbest " << juce::String (1000.0 * b.lag / m.sampleRate, 3) << "ms pol " << b.polarity << " sum asRecorded " << juce::String (b.asRecordedDb, 2)
-              << " linedUp " << juce::String (b.gainDb, 2) << " rot " << juce::String (b.rotationDeg, 0) << "deg " << juce::String (b.withRotationDb, 2) << " limit " << juce::String (b.limitDb, 2);
+              << " linedUp " << juce::String (b.gainDb, 2) << " holds " << m.results.stabilityWindows << "x +/-" << juce::String (1000.0 * m.results.stabilitySpread / m.sampleRate, 3) << "ms level " << juce::String (m.state.mixLevelDb, 1) << "dB rot " << juce::String (b.rotationDeg, 0) << "deg " << juce::String (b.withRotationDb, 2) << " limit " << juce::String (b.limitDb, 2);
         for (int r = 0; r < kNumRefs; ++r)
             if (const auto& v = m.results.vs[r]; v.valid && ! main (m))
             {
@@ -293,37 +325,60 @@ void ArrayLabEditor::cellClicked (int row, int column, const juce::MouseEvent&)
 
 void ArrayLabEditor::paint (juce::Graphics& g) { g.fillAll (ui::bg); }
 
+/** Left and right arrows nudge the selected microphone's delay by one sample (ten with shift). */
+bool ArrayLabEditor::keyPressed (const juce::KeyPress& key)
+{
+    const int direction = key.isKeyCode (juce::KeyPress::leftKey) ? -1 : key.isKeyCode (juce::KeyPress::rightKey) ? 1 : 0;
+    if (direction == 0)
+        return false;
+    for (auto& m : mics)
+        if (m.index == selected && ! isMain (m.state.role) && m.sampleRate > 0.0)
+        {
+            auto state = hub.getMic (selected);
+            state.offsetMs += direction * (key.getModifiers().isShiftDown() ? 10.0 : 1.0) * 1000.0 / m.sampleRate;
+            hub.setMic (selected, state);
+            timerCallback();
+            return true;
+        }
+    return false;
+}
+
 void ArrayLabEditor::resized()
 {
     auto area = getLocalBounds().reduced (10);
     auto top = area.removeFromTop (32);
-    title.setBounds (top.removeFromLeft (104));
-    analyseButton.setBounds (top.removeFromLeft (124));
+    title.setBounds (top.removeFromLeft (100));
+    analyseButton.setBounds (top.removeFromLeft (116));
     top.removeFromLeft (6);
-    resetButton.setBounds (top.removeFromLeft (112));
+    resetButton.setBounds (top.removeFromLeft (110));
     top.removeFromLeft (6);
-    lockButton.setBounds (top.removeFromLeft (84));
+    lockButton.setBounds (top.removeFromLeft (80));
     top.removeFromLeft (10);
     bypassButton.setBounds (top.removeFromLeft (100));
+    top.removeFromLeft (6);
+    for (auto& b : shotButtons) b.setBounds (top.removeFromLeft (30));
+    exportButton.setBounds (top.removeFromRight (64));
+    top.removeFromRight (6);
     copyButton.setBounds (top.removeFromRight (100));
     top.removeFromRight (10);
-    addGroupButton.setBounds (top.removeFromRight (76));
+    addGroupButton.setBounds (top.removeFromRight (70));
     top.removeFromRight (6);
-    groupBox.setBounds (top.removeFromRight (140));
+    groupBox.setBounds (top.removeFromRight (130));
     top.removeFromRight (12);
     checkTab.setBounds (top.removeFromRight (60));
     detailTab.setBounds (top.removeFromRight (60));
-    alignTab.setBounds (top.removeFromRight (56));
     stageTab.setBounds (top.removeFromRight (56));
-    top.removeFromRight (10);
-    status.setBounds (top);
+    alignTab.setBounds (top.removeFromRight (56));
 
-    hint.setBounds (area.removeFromTop (26));
+    auto second = area.removeFromTop (26);
+    status.setBounds (second.removeFromRight (300));
+    hint.setBounds (second);
     area.removeFromTop (2);
     inspector.setBounds (area.removeFromRight (350));
     area.removeFromRight (8);
     stage.setBounds (area);
     table.setBounds (area);
+    stripView.setBounds (area);
     checkView.setBounds (area);
     detailView.setBounds (area);
 }

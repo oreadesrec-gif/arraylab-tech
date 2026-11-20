@@ -218,6 +218,22 @@ int main()
         check (m.results.vs[0].valid && ! m.results.vs[0].reliable && ! m.results.best.worthwhile() && m.applied.delayLms < 1e-9, "unrelated microphone: nothing to gain, left alone");
     }
 
+    // Does the delay hold through the passage, and what does the mic's level in the mix change?
+    {
+        const auto before = info (spot[0]).results;
+        std::printf ("  spot 1 re-measured on %d stretches of music: the delay moved by +/- %.3f samples\n", before.stabilityWindows, before.stabilitySpread);
+        check (before.stabilityWindows >= 2 && before.stabilitySpread < 0.1, "the delay is re-measured through the passage and found steady");
+        edit (spot[0], [] (MicState& m) { m.mixLevelDb = -12.0; });
+        juce::Thread::sleep (600);
+        const auto quiet = info (spot[0]).results.best;
+        edit (spot[0], [] (MicState& m) { m.mixLevelDb = 0.0; });
+        juce::Thread::sleep (600);
+        const auto back = info (spot[0]).results.best;
+        std::printf ("  spot 1 lined up gains %+.2f dB at equal level, %+.2f dB when mixed 12 dB down\n", before.best.gainDb, quiet.gainDb);
+        check (quiet.gainDb < before.best.gainDb - 0.2 && quiet.gainDb > 0.0 && std::abs (back.gainDb - before.best.gainDb) < 0.01,
+               "level in the mix: 12 dB down there is less to gain; back up, the figure returns");
+    }
+
     // The rest checks each manual choice in turn, starting from "nearest main microphone".
     for (auto& p : spot) edit (p, [] (MicState& m) { m.alignTo = AlignTo::nearest; });
     edit (pairSpot, [] (MicState& m) { m.alignTo = AlignTo::nearest; });
@@ -420,6 +436,46 @@ int main()
         edit (spot[2], [] (MicState& m) { m.phaseRotationDeg = 0.0; });
         check (info (spot[0]).partnerIndex < 0 && info (spot[2]).partnerIndex < 0
                    && std::abs (info (spot[0]).applied.delayLms - info (spot[2]).applied.delayLms) > 1.0, "linked pair: unlinking gives each its own delay back");
+    }
+
+    // The strip: on/off, polarity by hand, "the main array leads by", solo in context.
+    {
+        const auto base = info (spot[0]).applied;
+        edit (spot[0], [] (MicState& m) { m.flip = true; });
+        check (info (spot[0]).applied.polarity == -base.polarity, "strip: polarity can be turned over by hand");
+        edit (spot[0], [] (MicState& m) { m.flip = false; m.enabled = false; });
+        check (info (spot[0]).applied.delayLms < 1e-9 && info (spot[0]).applied.polarity == 1, "strip: switched off, the mic is as recorded");
+        edit (spot[0], [] (MicState& m) { m.enabled = true; });
+
+        { auto sc = hub.getScene(); sc.leadMs = 5.0; hub.setScene (sc); }
+        check (std::abs (info (spot[0]).applied.delayLms - base.delayLms - 5.0) < 1e-6 && info (stray).applied.delayLms < 1e-9,
+               "main leads by 5 ms: every lined-up mic arrives 5 ms later, an untouched one stays put");
+        { auto sc = hub.getScene(); sc.leadMs = 0.0; hub.setScene (sc); }
+
+        hub.setSolo (spot[0].slot());
+        listen (2.0);
+        double others = 0.0, mine = 0.0;
+        for (float v : tail (outL[1])) others += (double) v * v;
+        for (float v : tail (outL[0])) mine += (double) v * v;
+        hub.setSolo (-1);
+        check (others < 1e-9 && mine > 1e-3, "solo in context: the other spots fall silent, the soloed one plays");
+    }
+
+    // Snapshots: A and B each keep their own settings.
+    {
+        edit (spot[0], [] (MicState& m) { m.offsetMs = 2.0; });
+        const double inA = info (spot[0]).applied.delayLms;
+        hub.recallSnapshot (1); // B starts as a copy of A
+        edit (spot[0], [] (MicState& m) { m.offsetMs = 0.0; m.phaseRotationDeg = 20.0; });
+        hub.recallSnapshot (0);
+        const auto a = info (spot[0]);
+        hub.recallSnapshot (1);
+        const auto b = info (spot[0]);
+        hub.recallSnapshot (0);
+        edit (spot[0], [] (MicState& m) { m.offsetMs = 0.0; });
+        check (std::abs (a.state.offsetMs - 2.0) < 1e-9 && std::abs (a.state.phaseRotationDeg) < 1e-9 && std::abs (a.applied.delayLms - inA) < 1e-9
+                   && std::abs (b.state.offsetMs) < 1e-9 && std::abs (b.state.phaseRotationDeg - 20.0) < 1e-9 && hub.activeShot() == 0,
+               "snapshots: A and B each come back with their own settings");
     }
 
     // A locked measurement survives a reset and a new analysis.

@@ -4,6 +4,7 @@
 #include "Inspector.h"
 #include "CheckView.h"
 #include "DetailView.h"
+#include "StripView.h"
 
 class ArrayLabEditor : public juce::AudioProcessorEditor,
                        private juce::TableListBoxModel,
@@ -15,6 +16,7 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;
 
 private:
     int getNumRows() override { return rows.size(); }
@@ -36,14 +38,17 @@ private:
     int selected = -1, groupFilter = -1;
 
     juce::Label title { {}, "ArrayLab" }, status, hint;
-    juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Align" }, detailTab { "Detail" }, checkTab { "Check" },
-                     addGroupButton { "+ Group" }, copyButton { "Copy report" }, lockButton { "Lock all" };
+    juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Mix" }, detailTab { "Detail" }, checkTab { "Check" },
+                     addGroupButton { "+ Group" }, copyButton { "Copy report" }, lockButton { "Lock all" }, exportButton { "Export" },
+                     shotButtons[3] { juce::TextButton ("A"), juce::TextButton ("B"), juce::TextButton ("C") };
+    std::unique_ptr<juce::FileChooser> chooser;
     juce::ToggleButton bypassButton { "Bypass all" };
     juce::ComboBox groupBox;
     StageView stage;
     Inspector inspector;
     CheckView checkView;
     DetailView detailView;
+    StripView stripView;
     int view = 0;
     juce::TableListBox table { "mics", this };
 

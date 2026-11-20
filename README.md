@@ -3,9 +3,17 @@
 Time and phase alignment of spot, outrigger and ambience microphones against a
 main pair or Decca tree, measured on the music itself. VST3, aimed at Pyramix.
 
-## Status: 0.6
+## Status: 0.7
 
 One instance per track, one shared window with four views.
+
+- **Mix**: the working view, one line per microphone like the strips of a
+  console: what there is to gain, the delay (with one-sample nudges, also on
+  the left and right arrow keys), polarity, a phase turn in degrees, the
+  microphone's level in the mix, how well its delay holds through the passage,
+  solo with the main array, lock, and an on/off switch. Above the strips, one
+  setting makes the main array lead every lined-up microphone by a few
+  milliseconds. A, B and C hold three complete sets of settings to compare.
 
 - **Stage**: top view of the session. Main arrays (AB, ORTF, NOS, XY, Blumlein,
   Decca Tree or custom spacing, angle and pattern) and every microphone, with

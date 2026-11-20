@@ -18,7 +18,7 @@ CheckView::CheckView()
     clearButton.onClick = [this] { if (onClearRefine) onClearRefine(); };
     addAndMakeVisible (clearButton);
     matchButton.onClick = [this] { if (onMatch) onMatch (matchButton.getToggleState()); };
-    addAndMakeVisible (refineButton);
+    addChildComponent (refineButton); // kept for sessions that used it; its gain proved marginal
     addAndMakeVisible (matchButton);
 }
 
@@ -89,7 +89,7 @@ void CheckView::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (12.0f));
     g.drawText ("Grey: as recorded.  Blue: with the corrections.  Green: where they add, red: where they cancel.",
                 verdict.removeFromTop (16), juce::Justification::left);
-    g.drawText ("Refine: turns each phase-corrected mic towards the whole sum, in 3 passes of 5 s of music.  Match level: equal loudness with and without Bypass all.",
+    g.drawText ("Match level: equal loudness with and without Bypass all. Levels are those set in the Mix view (Level in mix), else as recorded.",
                 verdict.removeFromTop (16), juce::Justification::left);
 
     // Curves.

@@ -94,10 +94,13 @@ void ArrayLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     tap[0].setTarget (juce::jlimit (0.0f, limit, bypass ? held : live.delayL.load()));
     tap[1].setTarget (juce::jlimit (0.0f, limit, bypass ? held : live.delayR.load()));
     const float trim = sharedHub->outputTrim();
-    gain[0].setTargetValue (bypass ? live.bypassGainL.load() : live.gainL.load() * trim);
-    gain[1].setTargetValue (bypass ? live.bypassGainR.load() : live.gainR.load() * trim);
-    cross[0].setTargetValue (bypass ? 0.0f : live.crossLR.load() * trim); // left capsule into the right bus
-    cross[1].setTargetValue (bypass ? 0.0f : live.crossRL.load() * trim); // right capsule into the left bus
+    // Solo in context: while one microphone is soloed, only it and the main arrays are heard.
+    const int solo = sharedHub->solo();
+    const float heard = solo >= 0 && solo != slotIndex && ! live.isMain.load() ? 0.0f : 1.0f;
+    gain[0].setTargetValue (heard * (bypass ? live.bypassGainL.load() : live.gainL.load() * trim));
+    gain[1].setTargetValue (heard * (bypass ? live.bypassGainR.load() : live.gainR.load() * trim));
+    cross[0].setTargetValue (heard * (bypass ? 0.0f : live.crossLR.load() * trim)); // left capsule into the right bus
+    cross[1].setTargetValue (heard * (bypass ? 0.0f : live.crossRL.load() * trim)); // right capsule into the left bus
 
     // Multiband phase correction (its latency is already taken out of the delays).
     {
