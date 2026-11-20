@@ -93,8 +93,14 @@ public:
     void reset (int frameSize);
 
     /** Returns false when the frame was left out: silence, or the target far
-        below its recent level (its instrument is not playing, only spill). */
-    bool accumulate (const FrameSpectrum& reference, const FrameSpectrum& target);
+        below its recent level (its instrument is not playing, only spill).
+
+        With `ownSourceOnly`, only the moments and frequencies where the target is
+        louder than usual against the reference are kept. A spot is close to its
+        instrument, so that is where its instrument is what it hears; spill from the
+        other players, which the reference hears better, is left out. Without it the
+        loudest thing the two microphones share wins, whoever is playing. */
+    bool accumulate (const FrameSpectrum& reference, const FrameSpectrum& target, bool ownSourceOnly = true);
 
     /** `weighted` = false keeps to the plain first pass, for comparison. */
     DelayResult estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& scratch,
@@ -114,6 +120,11 @@ public:
     double sumGain (double sampleRate, double lag, int polarity, double rotation = 0.0, bool limit = false,
                     double lowHz = 63.0, double highHz = 4000.0, double level = 1.0) const;
 
+    /** The delays most likely to make that sum fullest: peaks of the correlation weighted exactly as
+        sumGain weighs the spectrum. Their `value` only carries the polarity; score them with sumGain. */
+    int gainCandidates (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& scratch, SearchRange range,
+                        Peak* found, int maxFound, double lowHz = 63.0, double highHz = 4000.0, double level = 1.0) const;
+
     /** Direction of the leftover phase, weighted the same way: minus its angle is the best single rotation. */
     std::complex<double> sumVector (double sampleRate, double lag, int polarity, double lowHz = 63.0, double highHz = 4000.0, double level = 1.0) const;
 
@@ -128,5 +139,7 @@ private:
     double recentPeak = 0.0;
     std::vector<std::complex<float>> sxy;
     std::vector<float> sxx, syy;
+    std::vector<float> allXx, allYy; // everything heard so far, per group of bins: the usual balance
+    double kept = 0.0, offered = 0.0; // share of the material that passed the own-source test
 };
 }

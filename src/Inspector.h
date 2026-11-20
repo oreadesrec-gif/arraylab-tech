@@ -63,6 +63,6 @@ private:
     juce::Array<int> partnerSlots;
     juce::Slider *x, *y, *z, *angle, *sourceDistance, *pairSpacing, *pairAngle, *offset, *pan, *pairWidth, *phaseAmount, *phaseLow, *phaseHigh, *phaseRotation,
                  *spacing, *arrayAngle, *forward, *arrayHeight, *rotation, *temperature;
-    juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource, *followPlan, *timeDifference, *measureLock;
+    juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource, *followPlan, *timeDifference, *measureLock, *allowAdvance;
     juce::Label *roleHelp, *measured, *note, *arrayHeader, *panStatus;
 };

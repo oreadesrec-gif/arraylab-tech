@@ -194,6 +194,20 @@ void ArrayLabEditor::timerCallback()
     else if (analysing && ! anyPlaying)     h = anyTimeline ? "Waiting for playback: press play on a passage where everyone is heard." : "Waiting for playback (the host has not sent a timeline position yet).";
     else if (analysing)                     h = "Analysing the music... let it run 20 seconds or more, then press Stop. Nothing is applied until you stop.";
     else if (! anyResult)                   h = "Press Analyze, then play the music. The result stays until you press Reset analysis.";
+    else
+    {
+        // Point out a microphone that has little to do with the main array of its group.
+        for (auto& m : mics)
+            if (! isMain (m.state.role) && m.results.stabilityWindows >= 3 && m.sampleRate > 0.0
+                && 1000.0 * m.results.stabilitySpread / m.sampleRate > Benefit::steadyMs)
+            {
+                h = m.state.name + juce::String::fromUTF8 (": its delay against the main array wanders (\xc2\xb1 ") + juce::String (1000.0 * m.results.stabilitySpread / m.sampleRate, 1)
+                    + " ms). If it is another instrument, give it its own group and main pair.";
+                break;
+            }
+        if (h.isEmpty() && hub.sessionShiftMs() > 0.0)
+            h = "Every track is delayed by " + juce::String (hub.sessionShiftMs(), 2) + " ms, so that a mic arriving after the main array can be lined up.";
+    }
     hint.setText (h, juce::dontSendNotification);
 
     juce::String focusName = "the selected microphone";
@@ -235,7 +249,7 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
         case colL:        return main ? "ref" : delay (0);
         case colC:        return main ? "ref" : delay (1);
         case colR:        return main ? "ref" : delay (2);
-        case colConf:     return main || m.applied.ref < 0 ? "-" : effectiveResult (m.results, m.state, m.applied.ref, m.isStereoPair()).reliable ? "yes" : "NO";
+        case colConf:     return main ? "-" : m.applied.linedUp ? "yes" : "no";
         case colGain:     return main || ! m.results.best.valid ? "-" : juce::String (m.results.best.gainDb - m.results.best.asRecordedDb >= 0.0 ? "+" : "")
                                                                         + juce::String (m.results.best.gainDb - m.results.best.asRecordedDb, 1) + " dB";
         case colApplied:  return main ? "-" : std::abs (m.applied.delayLms - m.applied.delayRms) > 0.005
@@ -254,8 +268,9 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << "ArrayLab 0.7 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
-    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tSure\tTo gain\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
+    s << "ArrayLab 0.8 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "all tracks delayed by " << juce::String (hub.sessionShiftMs(), 3) << " ms, main leads by " << juce::String (scene.leadMs, 1) << " ms\n";
+    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tLined up\tTo gain\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
     for (auto& m : mics)
     {
         for (int c = colName; c <= colIO; ++c)

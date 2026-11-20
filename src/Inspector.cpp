@@ -92,7 +92,7 @@ Inspector::Inspector (Hub& h) : hub (h)
     help ("Turns the whole microphone's phase, to the degree; 180 is a polarity flip. It adds to Phase by frequency, so use one or the other. Type a value by double-clicking the slider.", notMain, 44);
     offset = &slider ("Extra delay", -20.0, 60.0, 0.1, " ms", mic, notMain);
     help ("Untick a box to bypass that correction. The Detail view shows the peak chosen and the phase before and after.", notMain);
-    note = &help ({}, notMain, 32);
+    note = &help ({}, notMain, 62);
     note->setColour (juce::Label::textColourId, ui::warn);
 
     header ("5  PAN", notMain);
@@ -129,6 +129,9 @@ Inspector::Inspector (Hub& h) : hub (h)
     groupName.onTextChange = sc;
     add ("This group's name", groupName, 24, always);
     panLaw = &combo ("Pan law", { "-3 dB", "-4.5 dB", "-6 dB" }, sc);
+    allowAdvance = &toggle (sc);
+    allowAdvance->setButtonText ("Line up mics that arrive after the main array");
+    help ("Such a mic cannot be moved earlier, so every other track is moved later by the same amount (a few ms, not reported to the host).", always, 44);
     precision = &combo ("Phase precision", { "Live: no latency", "Full resolution: adds latency" }, sc);
     help ("Full resolution corrects the phase precisely down to the lowest notes. Every ArrayLab instance then reports the same latency (about 85 ms) to the host.", always, 44);
     temperature = &slider ("Air temperature", -10.0, 40.0, 0.5, juce::String::fromUTF8 (" \xc2\xb0""C"), sc);
@@ -391,6 +394,7 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
     set (arrayHeight, arr.height); set (rotation, arr.rotationDeg);
     if ((changedSelection || ! busy (groupName)) && groupName.getText() != scene.groupNames[group]) groupName.setText (scene.groupNames[group], false);
     pick (panLaw, scene.panLaw); pick (precision, scene.precision); set (temperature, scene.tempC);
+    allowAdvance->setToggleState (scene.allowAdvance, juce::dontSendNotification);
 }
 
 void Inspector::commitMic()
@@ -462,6 +466,7 @@ void Inspector::commitScene (bool presetChosen)
     if (groupName.getText().trim().isNotEmpty()) sc.groupNames[group] = groupName.getText();
     sc.panLaw = juce::jmax (0, panLaw->getSelectedItemIndex());
     sc.precision = juce::jmax (0, precision->getSelectedItemIndex());
+    sc.allowAdvance = allowAdvance->getToggleState();
     sc.tempC = temperature->getValue();
     hub.setScene (sc);
 }

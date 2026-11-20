@@ -73,15 +73,19 @@ void FrameSpectrum::setSum (const FrameSpectrum* const* parts, int numParts)
 }
 
 //==============================================================================
+namespace { constexpr int kGroup = 8; } // bins judged together
+
 void DelayEstimator::reset (int frameSize)
 {
     n = frameSize;
     numFrames = numSkipped = 0;
     recentPeak = 0.0;
+    kept = offered = 0.0;
     sxy.clear(); sxx.clear(); syy.clear(); // reallocated on first use
+    allXx.clear(); allYy.clear();
 }
 
-bool DelayEstimator::accumulate (const FrameSpectrum& ref, const FrameSpectrum& tgt)
+bool DelayEstimator::accumulate (const FrameSpectrum& ref, const FrameSpectrum& tgt, bool ownSourceOnly)
 {
     if (n == 0 || ref.energy() < 1e-10 || tgt.energy() < 1e-10)
         return false;
@@ -95,20 +99,63 @@ bool DelayEstimator::accumulate (const FrameSpectrum& ref, const FrameSpectrum& 
         return false;
     }
 
+    const int bins = n / 2 + 1, groups = bins / kGroup;
     if (sxy.empty())
     {
-        sxy.assign ((size_t) n / 2 + 1, {});
-        sxx.assign ((size_t) n / 2 + 1, 0.0f);
-        syy.assign ((size_t) n / 2 + 1, 0.0f);
+        sxy.assign ((size_t) bins, {});
+        sxx.assign ((size_t) bins, 0.0f);
+        syy.assign ((size_t) bins, 0.0f);
+        allXx.assign ((size_t) groups, 0.0f);
+        allYy.assign ((size_t) groups, 0.0f);
     }
 
     const auto& x = ref.bins();
     const auto& y = tgt.bins();
-    for (size_t k = 0; k < sxy.size(); ++k)
+
+    // The usual balance between the two microphones, octave by octave, from everything heard
+    // so far. Judging each narrow slice against itself would not do: where only the spill ever
+    // sounds, the spill would pass for normal.
+    static thread_local std::vector<double> runX, runY;
+    runX.assign ((size_t) groups + 1, 0.0);
+    runY.assign ((size_t) groups + 1, 0.0);
+    for (int g = 0; g < groups; ++g)
     {
-        sxy[k] += y[k] * std::conj (x[k]);
-        sxx[k] += std::norm (x[k]);
-        syy[k] += std::norm (y[k]);
+        runX[(size_t) g + 1] = runX[(size_t) g] + allXx[(size_t) g];
+        runY[(size_t) g + 1] = runY[(size_t) g] + allYy[(size_t) g];
+    }
+
+    for (int g = 0; g < groups; ++g)
+    {
+        const int k0 = g * kGroup;
+        float ex = 0.0f, ey = 0.0f;
+        for (int k = k0; k < k0 + kGroup; ++k) { ex += std::norm (x[(size_t) k]); ey += std::norm (y[(size_t) k]); }
+
+        // Is the target louder than usual against the reference here and now? Then its own
+        // source is what it is hearing. The balance needs a few frames before it means anything.
+        float weight = 1.0f;
+        if (ownSourceOnly && numFrames >= 4 && ex > 0.0f)
+        {
+            const int g0 = std::clamp ((int) (g * 0.7071), 0, groups - 1), g1 = std::clamp ((int) (g * 1.4142) + 1, g0, groups - 1);
+            const double usualX = runX[(size_t) g1 + 1] - runX[(size_t) g0], usualY = runY[(size_t) g1 + 1] - runY[(size_t) g0];
+            if (usualX > 0.0 && usualY > 0.0)
+            {
+                const double dominance = ((double) ey / ex) / (usualY / usualX); // 1 = the usual balance
+                weight = dominance >= 1.0 ? 1.0f : (float) (dominance * dominance);
+            }
+        }
+        allXx[(size_t) g] += ex;
+        allYy[(size_t) g] += ey;
+        offered += 1.0;
+        kept += weight;
+        if (weight < 1.0e-3f)
+            continue;
+
+        for (int k = k0; k < k0 + kGroup; ++k)
+        {
+            sxy[(size_t) k] += weight * y[(size_t) k] * std::conj (x[(size_t) k]);
+            sxx[(size_t) k] += weight * std::norm (x[(size_t) k]);
+            syy[(size_t) k] += weight * std::norm (y[(size_t) k]);
+        }
     }
     ++numFrames;
     return true;
@@ -158,8 +205,8 @@ DelayResult DelayEstimator::estimate (const Fft& fft, double sampleRate, std::ve
         for (int i = lo; i <= hi; ++i)
             if (const double v = std::abs ((double) c[(size_t) ((i + n) % n)].real()); v > first) { first = v; firstLag = i; }
 
-        const int group = 8, numGroups = (n / 2) / group;
-        const double averages = std::max (2.0, numFrames * group / 3.0);
+        const int group = kGroup, numGroups = (n / 2) / group;
+        const double averages = std::max (2.0, numFrames * group / 3.0 * (offered > 0.0 ? kept / offered : 1.0));
         std::vector<double> agree ((size_t) numGroups + 1, 0.0); // running total, for quick averages
         const auto step = std::polar (1.0, 2.0 * kPi * firstLag / n);
         auto turn = std::complex<double> (1.0, 0.0);
@@ -304,7 +351,8 @@ void DelayEstimator::transfer (double sampleRate, double delaySamples, int polar
         if (band (b, sampleRate, delaySamples, cross, xx, yy, bins))
         {
             gamma[b] = cross / std::sqrt (xx * yy) * (double) polarity;
-            averages[b] = std::max (1.0, numFrames * bins / 3.0); // overlapping, windowed frames are not independent
+            // Overlapping, windowed frames are not independent, and only part of the material was kept.
+            averages[b] = std::max (1.0, numFrames * bins / 3.0 * (offered > 0.0 ? kept / offered : 1.0));
         }
     }
 }
@@ -330,6 +378,66 @@ double DelayEstimator::sumGain (double sampleRate, double lag, int polarity, dou
         ++count;
     }
     return count > 0 ? total / count : 0.0;
+}
+
+int DelayEstimator::gainCandidates (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& c, SearchRange range,
+                                    Peak* found, int maxFound, double lowHz, double highHz, double level) const
+{
+    if (numFrames == 0 || sxy.empty() || maxFound <= 0)
+        return 0;
+
+    // Weight of each 1/12 octave: one over the power the two microphones put into it, so that the
+    // correlation adds up, band by band, the same ratio sumGain turns into decibels.
+    double weightOf[kFineBands] {};
+    for (int b = 0; b < kFineBands; ++b)
+    {
+        std::complex<double> cross;
+        double xx, yy;
+        int bins;
+        const double f = bandFrequency (b);
+        if (f >= lowHz && f <= highHz && band (b, sampleRate, 0.0, cross, xx, yy, bins))
+            weightOf[b] = 2.0 * level / (xx + level * level * yy);
+    }
+
+    c.assign ((size_t) n, {});
+    for (int k = 1; k < n / 2; ++k)
+    {
+        const int b = (int) std::lround (bandPosition (k * sampleRate / n));
+        if (b < 0 || b >= kFineBands || weightOf[b] <= 0.0) continue;
+        c[(size_t) k] = sxy[(size_t) k] * (float) weightOf[b];
+        c[(size_t) (n - k)] = std::conj (c[(size_t) k]);
+    }
+    fft.inverse (c.data());
+
+    const int lo = (int) std::ceil (std::max (range.minLag, -(double) (n / 2 - 2)));
+    const int hi = (int) std::floor (std::min (range.maxLag, (double) (n / 2 - 2)));
+    const auto at = [&] (int lag) { return (double) c[(size_t) ((lag + n) % n)].real(); };
+
+    struct Candidate { int lag; double height; };
+    std::vector<Candidate> all;
+    for (int i = lo; i <= hi; ++i)
+    {
+        const double v = std::abs (at (i));
+        if (v >= std::abs (at (i - 1)) && v > std::abs (at (i + 1)))
+            all.push_back ({ i, v });
+    }
+    std::sort (all.begin(), all.end(), [] (const Candidate& a, const Candidate& b) { return a.height > b.height; });
+
+    int count = 0;
+    for (auto& cand : all)
+    {
+        if (count == maxFound) break;
+        bool tooClose = false;
+        for (int p = 0; p < count; ++p)
+            tooClose |= std::abs (found[p].lag - cand.lag) < kPeakSeparation;
+        if (tooClose) continue;
+        const double sign = at (cand.lag) < 0.0 ? -1.0 : 1.0;
+        const double a = sign * at (cand.lag - 1), b = sign * at (cand.lag), d = sign * at (cand.lag + 1);
+        const double den = a - 2.0 * b + d;
+        const double frac = std::abs (den) > 1e-20 ? std::clamp (0.5 * (a - d) / den, -0.5, 0.5) : 0.0;
+        found[count++] = { cand.lag + frac, (float) sign, 0.0f };
+    }
+    return count;
 }
 
 std::complex<double> DelayEstimator::sumVector (double sampleRate, double lag, int polarity, double lowHz, double highHz, double level) const

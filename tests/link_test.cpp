@@ -292,7 +292,8 @@ int main()
     edit (spot[2], [] (MicState& m) { m.phaseHighHz = 20000.0; });
     std::printf ("  spot 3 match with its main mic: delay only %.3f, phase up to 500 Hz %.3f, full phase %.3f (%d taps)\n",
                  withoutPhase, lowsOnly, withPhase, info (spot[2]).applied.phaseTaps);
-    check (withPhase > 0.95 && withPhase > withoutPhase + 0.05, "phase by frequency brings the phase-shifted spot in line");
+    // Only the material where the spot's own source dominates is used now: fewer averages, a slightly more cautious curve.
+    check (withPhase > 0.9 && withPhase > withoutPhase + 0.05, "phase by frequency brings the phase-shifted spot in line");
     check (lowsOnly > withoutPhase + 0.02 && lowsOnly < withPhase - 0.05, "phase range: limited to the lows, it corrects only part");
 
     // Phase turned by hand, to the degree: the match with the reference follows the cosine of the angle.
@@ -459,6 +460,27 @@ int main()
         for (float v : tail (outL[0])) mine += (double) v * v;
         hub.setSolo (-1);
         check (others < 1e-9 && mine > 1e-3, "solo in context: the other spots fall silent, the soloed one plays");
+    }
+
+    // A microphone arriving after the main array is lined up by delaying every other track.
+    {
+        const double natural = info (spot[1]).applied.delayLms;
+        edit (spot[1], [&] (MicState& m) { m.offsetMs = -(natural + 1.0); }); // as if it sat 1 ms behind the main pair
+        const auto late = info (spot[1]);
+        const int shift = (int) std::ceil (1.0 * sr / 1000.0 - 1.0e-6);
+        std::printf ("  late mic: wants %.3f ms, all tracks delayed by %.3f ms: main at %.0f samples, the late mic at %.2f, spot 1 at %.2f\n",
+                     late.applied.delayLms, hub.sessionShiftMs(), (double) hub.live (mainPair.slot()).delayL.load(),
+                     (double) hub.live (spot[1].slot()).delayL.load(), (double) hub.live (spot[0].slot()).delayL.load());
+        check (std::abs (hub.sessionShiftMs() - 1.0) < 1e-6 && std::abs (late.applied.delayLms + 1.0) < 1e-6
+                   && std::abs (hub.live (mainPair.slot()).delayL.load() - shift) < 1e-6 && std::abs (hub.live (spot[1].slot()).delayL.load()) < 0.01
+                   && std::abs (hub.live (spot[0].slot()).delayL.load() - (shift + info (spot[0]).applied.delayLms * sr / 1000.0)) < 0.01,
+               "a mic arriving after the main array: every other track moves later by what it needs");
+        listen (2.0);
+        // With every other track 1 ms later and this one not delayed at all, it plays exactly as recorded:
+        // the source as its nearest main mic hears it, earlier by the alignment delay it no longer gets.
+        check (match (tail (outL[1], (int) std::lround (natural * sr / 1000.0)), tail (nearest1)) > 0.99, "the late mic itself is left undelayed");
+        edit (spot[1], [] (MicState& m) { m.offsetMs = 0.0; });
+        check (hub.sessionShiftMs() < 1e-9 && hub.live (mainPair.slot()).delayL.load() < 1e-6, "back to normal, the common delay is gone");
     }
 
     // Snapshots: A and B each keep their own settings.

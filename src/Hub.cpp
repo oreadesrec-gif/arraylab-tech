@@ -423,13 +423,41 @@ Hub::RefSet Hub::refsForGroup (int group, int* arrayGroup) const
 
 void Hub::recomputeAll()
 {
-    for (int i = 0; i < maxSlots; ++i)
-        if (slots[(size_t) i].active.load())
-            recompute (i);
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        for (int i = 0; i < maxSlots; ++i)
+            if (slots[(size_t) i].active.load())
+                recomputeOne (i);
+        if (! updateShift())
+            break;
+    }
+}
+
+void Hub::recompute (int slot)
+{
+    recomputeOne (slot);
+    if (updateShift())
+        recomputeAll();
+}
+
+/** A microphone that arrives after the main array cannot be moved earlier, but every other track
+    can be moved later by the same amount. This finds how much the latest one needs (20 ms at most). */
+bool Hub::updateShift()
+{
+    double need = 0.0;
+    if (scene.allowAdvance)
+        for (auto& s : slots)
+            if (s.active.load())
+                need = juce::jmax (need, s.advanceMs);
+    need = juce::jmin (need, 20.0);
+    if (std::abs (need - sessionShift.load()) < 1.0e-9)
+        return false;
+    sessionShift = need;
+    return true;
 }
 
 /** Turns measurements, stage position and switches into what the audio thread applies. */
-void Hub::recompute (int slot)
+void Hub::recomputeOne (int slot)
 {
     auto& s = slots[(size_t) slot];
     const auto& m = s.state;
@@ -437,6 +465,8 @@ void Hub::recompute (int slot)
     const double sr = s.sampleRate.load();
     const int numIn = s.numIn.load(), numOut = s.numOut.load();
     const int latency = latencyFor (scene.precision, sr);
+    const double shift = std::ceil (sessionShift.load() * 0.001 * sr - 1.0e-6); // whole samples, so the main array is never interpolated
+    double advance = 0.0;
 
     MicApplied a;
     double dL = 0.0, dR = 0.0; // alignment delays, samples
@@ -524,9 +554,15 @@ void Hub::recompute (int slot)
                 e[ref].polarity = best.polarity;
             }
             base = -best.lag;
-            known = best.worthwhile();
-            if (! known)
+            // Worth it, and does one delay hold for the whole passage?
+            const double driftMs = sr > 0.0 ? 1000.0 * res.stabilitySpread / sr : 0.0;
+            const bool holds = res.stabilityWindows < 3 || driftMs <= Benefit::steadyMs;
+            known = best.worthwhile() && holds;
+            if (! best.worthwhile())
                 a.note = "Lining this mic up would change the sum by " + juce::String (best.gainDb - best.asRecordedDb, 2) + " dB: left as recorded.";
+            else if (! holds)
+                a.note = juce::String::fromUTF8 ("Its delay against the main array wanders by \xc2\xb1 ") + juce::String (driftMs, 2)
+                         + " ms: no single delay fits, so it is left as recorded. If it belongs to another instrument, give that instrument its own group and main pair.";
         }
         else if (ref >= 0)
         {
@@ -555,10 +591,16 @@ void Hub::recompute (int slot)
                 dL = offset - e[0].delaySamples; // each side lined up on its own main microphone
                 dR = offset - e[2].delaySamples;
             }
-            if (juce::jmin (dL, dR) < -0.5)
-                a.note = "Arrives after the reference: cannot be advanced";
-            dL = juce::jmax (0.0, dL);
-            dR = juce::jmax (0.0, dR);
+            // A negative delay means this microphone hears the source after the main array does.
+            advance = juce::jmax (0.0, -juce::jmin (dL, dR));
+            if (advance > shift + 0.5)
+                a.note = scene.allowAdvance ? "Arrives too long after the main array to be lined up (20 ms at most)"
+                                            : "Arrives after the main array: allow advancing in Session to line it up";
+            else if (advance > 0.5)
+                a.note = "Arrives after the main array: every other track is delayed by " + juce::String (1000.0 * shift / sr, 2) + " ms so it can be lined up";
+            dL = juce::jmax (-shift, dL);
+            dR = juce::jmax (-shift, dR);
+            a.linedUp = true;
         }
 
         if (m.polarityOn && known && ref >= 0 && e[ref].polarity < 0)
@@ -631,7 +673,7 @@ void Hub::recompute (int slot)
         const bool byHand = std::abs (m.phaseRotationDeg) > 0.01;
         if (byFrequency || byHand)
         {
-            const int room = latency + (int) std::floor (juce::jmin (dL, dR));
+            const int room = latency + (int) std::floor (shift + juce::jmin (dL, dR));
             const int most = latency > 0 ? latency : juce::nextPowerOfTwo ((int) (1024.0 * sr / 48000.0));
             int half = 32;
             while (half * 2 <= room && half * 2 <= most) half *= 2;
@@ -652,6 +694,8 @@ void Hub::recompute (int slot)
     if (! isMain (m.role) && ! m.enabled) // switched off on its strip: as recorded, pan apart
     {
         dL = dR = 0.0;
+        advance = 0.0;
+        a.linedUp = false;
         a.polarity = 1;
         phase = false;
         firLength = 0;
@@ -684,10 +728,11 @@ void Hub::recompute (int slot)
     s.applied = a;
     s.alignL = dL;
     s.alignR = dR;
+    s.advanceMs = sr > 0.0 ? 1000.0 * advance / sr : 0.0;
 
-    s.live.delayL = (float) juce::jmax (0.0, latency + dL - firLength / 2);
-    s.live.delayR = (float) juce::jmax (0.0, latency + dR - firLength / 2);
-    s.live.bypassDelay = latency;
+    s.live.delayL = (float) juce::jmax (0.0, latency + shift + dL - firLength / 2);
+    s.live.delayR = (float) juce::jmax (0.0, latency + shift + dR - firLength / 2);
+    s.live.bypassDelay = latency + (int) shift; // bypassed, every track keeps the same common delay
     s.live.gainL = gL * (float) a.polarity;
     s.live.gainR = gR * (float) a.polarity;
     s.live.crossLR = crossLR * (float) a.polarity;
@@ -1171,6 +1216,8 @@ void Hub::findBest (const Target& t, double sr, DelayResult* left, DelayResult* 
 
     best.valid = true;
     best.asRecordedDb = best.gainDb = score (0.0, 1);
+    Benefit inverted = best; // the best candidate that turns the polarity over
+    inverted.gainDb = -1000.0;
     for (auto* results : { left, right })
         for (int r = 0; r < kNumRefs; ++r)
             for (int p = 0; p < juce::jmin (4, results[r].numPeaks); ++p)
@@ -1179,8 +1226,30 @@ void Hub::findBest (const Target& t, double sr, DelayResult* left, DelayResult* 
                 const int polarity = peak.value < 0.0f ? -1 : 1;
                 const double gain = score (peak.lag, polarity);
                 peak.gainDb = (float) gain;
-                if (gain > best.gainDb) { best.gainDb = gain; best.lag = peak.lag; best.polarity = polarity; }
+                auto& into = polarity < 0 ? inverted : best;
+                if (gain > into.gainDb) { into.gainDb = gain; into.lag = peak.lag; into.polarity = polarity; }
             }
+
+    // Candidates read off the correlation that follows the same yardstick: the delays most likely
+    // to make the sum fullest, whether or not the plain correlation shows a clear peak there.
+    const auto range = rangeFor (t.role, sr);
+    for (auto* j : judges)
+    {
+        Peak found[kMaxPeaks];
+        const int count = j->gainCandidates (*fft, sr, scratch, range, found, kMaxPeaks, 63.0, 4000.0, t.level);
+        for (int p = 0; p < count; ++p)
+        {
+            const int polarity = found[p].value < 0.0f ? -1 : 1;
+            const double gain = score (found[p].lag, polarity);
+            auto& into = polarity < 0 ? inverted : best;
+            if (gain > into.gainDb) { into.gainDb = gain; into.lag = found[p].lag; into.polarity = polarity; }
+        }
+    }
+
+    // A real polarity fault shows as a large difference. A small one is two neighbouring ripples of
+    // the same correlation, and flipping on that would do more harm than good.
+    if (inverted.gainDb >= best.gainDb + Benefit::polarityMarginDb)
+        best = inverted;
 
     // The one rotation that would add most, and the ceiling a perfect phase correction would reach.
     std::complex<double> direction {};
@@ -1662,6 +1731,7 @@ juce::ValueTree Hub::saveInstance (int slot) const
     sc.setProperty ("tempC", scene.tempC, nullptr);   sc.setProperty ("panLaw", scene.panLaw, nullptr);
     sc.setProperty ("precision", scene.precision, nullptr);
     sc.setProperty ("leadMs", scene.leadMs, nullptr); sc.setProperty ("snapshot", scene.snapshot, nullptr);
+    sc.setProperty ("allowAdvance", scene.allowAdvance, nullptr);
     for (int g = 0; g < kMaxGroups; ++g)
     {
         const auto& a = scene.arrays[g];
@@ -1797,6 +1867,7 @@ void Hub::restoreInstance (int slot, const juce::ValueTree& t)
         scene.precision = juce::jlimit (0, 1, (int) sc.getProperty ("precision", 0));
         precisionMode = scene.precision;
         scene.leadMs = sc.getProperty ("leadMs", 0.0);
+        scene.allowAdvance = sc.getProperty ("allowAdvance", true);
         scene.snapshot = juce::jlimit (0, 2, (int) sc.getProperty ("snapshot", 0));
         activeSnapshot = scene.snapshot;
         for (int g = 0; g < kMaxGroups && g < sc.getNumChildren(); ++g)

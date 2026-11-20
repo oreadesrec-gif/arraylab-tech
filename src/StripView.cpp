@@ -34,7 +34,7 @@ public:
             s.setColour (juce::Slider::backgroundColourId, ui::panel2);
             addAndMakeVisible (s);
         };
-        bar (delay, 0.0, 200.0, 0.001, " ms");
+        bar (delay, -20.0, 200.0, 0.001, " ms"); // below zero: a mic advanced, by delaying every other track
         bar (rotation, -180.0, 180.0, 1.0, juce::String::fromUTF8 (" \xc2\xb0"));
         bar (level, -30.0, 12.0, 0.5, " dB");
         delay.setNumDecimalPlacesToDisplay (3);
@@ -93,13 +93,14 @@ public:
 
         const auto& best = info.results.best;
         gain.setText (best.valid ? signedDb (best.gainDb - best.asRecordedDb) : juce::String ("-"), juce::dontSendNotification);
-        gain.setColour (juce::Label::textColourId, best.worthwhile() ? ui::good : ui::dim);
+        // Green: lined up. Orange: there is something to gain but it is not applied (see the note on the right).
+        gain.setColour (juce::Label::textColourId, a.linedUp && best.worthwhile() ? ui::good : best.worthwhile() ? ui::warn : ui::dim);
 
         on.setToggleState (m.enabled, juce::dontSendNotification);
-        shown = juce::jmax (a.delayLms, a.delayRms);
+        shown = std::abs (a.delayLms) >= std::abs (a.delayRms) ? a.delayLms : a.delayRms;
         if (! delay.isMouseButtonDown (true) && ! delay.hasKeyboardFocus (true))
             delay.setValue (shown, juce::dontSendNotification);
-        const bool delayed = m.enabled && m.delayOn && (shown > 0.0 || a.ref >= 0 || info.results.best.worthwhile());
+        const bool delayed = a.linedUp;
         delay.setEnabled (delayed);
         minus.setEnabled (delayed);
         plus.setEnabled (delayed);
@@ -115,7 +116,7 @@ public:
         {
             const double ms = 1000.0 * r.stabilitySpread / rate;
             steady.setText (juce::String::fromUTF8 ("\xc2\xb1 ") + juce::String (ms, 2) + " ms", juce::dontSendNotification);
-            steady.setColour (juce::Label::textColourId, ms < 0.05 ? ui::good : ms < 0.3 ? ui::warn : ui::bad);
+            steady.setColour (juce::Label::textColourId, ms < 0.1 ? ui::good : ms <= Benefit::steadyMs ? ui::warn : ui::bad);
         }
         else
             steady.setText ({}, juce::dontSendNotification);

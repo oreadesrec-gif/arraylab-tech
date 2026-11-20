@@ -3,7 +3,7 @@
 Time and phase alignment of spot, outrigger and ambience microphones against a
 main pair or Decca tree, measured on the music itself. VST3, aimed at Pyramix.
 
-## Status: 0.7
+## Status: 0.8
 
 One instance per track, one shared window with four views.
 
@@ -24,6 +24,13 @@ One instance per track, one shared window with four views.
   sum; frames where its own instrument is not playing are left out; a spot is
   only searched where it can physically be; and a result whose peak does not
   stand clear of the floor is shown but not applied.
+- **Its own instrument**: a spot is lined up on the instrument it is there for.
+  Only the moments and frequencies where the spot is louder than usual against
+  the main array are analysed, so spill from the other players is left out.
+- **Late microphones**: one that hears the source after the main array is lined
+  up by delaying every other track by what it needs. A polarity is only turned
+  over on clear evidence, and a microphone whose delay wanders through the
+  passage is left as recorded.
 - **The yardstick**: for every candidate delay, how many dB fuller the sum of
   the microphone and the main array gets, measured on the music between 63 Hz
   and 4 kHz. By default the delay used is the one that gains most, and a

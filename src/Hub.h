@@ -74,7 +74,11 @@ struct Benefit
     double rotationDeg = 0.0;       // that rotation
 
     /** Under this, lining the microphone up is not worth touching it. */
-    static constexpr double worthwhileDb = 0.2;
+    static constexpr double worthwhileDb = 0.3;
+    /** Turning a microphone's polarity over needs clear evidence: this much better than leaving it. */
+    static constexpr double polarityMarginDb = 1.0;
+    /** A delay that wanders more than this through the passage (ms) is not one delay. */
+    static constexpr double steadyMs = 0.5;
     bool worthwhile() const noexcept { return valid && gainDb - asRecordedDb >= worthwhileDb; }
 };
 
@@ -113,6 +117,7 @@ int alignmentRef (const Effective* e, AlignTo);
 struct MicApplied
 {
     bool isReference = false;
+    bool linedUp = false;               // a delay or polarity from the analysis is really in use
     int ref = -1;                       // reference in use
     double delayLms = 0.0, delayRms = 0.0;
     float gainL = 1.0f, gainR = 1.0f;
@@ -177,6 +182,7 @@ struct Scene
     int panLaw = 0;     // 0: -3 dB, 1: -4.5 dB, 2: -6 dB
     int precision = 0;  // 0: live, no latency. 1: full-resolution phase, latency reported to the host
     double leadMs = 0.0; // every lined-up microphone arrives this long after the main array
+    bool allowAdvance = true; // a mic that arrives after the main array is lined up by delaying every other track
     int snapshot = 0;    // which of the three settings snapshots (A, B, C) is in use
     juce::int64 stamp = 0;
 };
@@ -226,6 +232,8 @@ public:
     /** Latency every instance reports to the host in a given precision mode. */
     static int latencyFor (int precision, double sampleRate);
     int precision() const noexcept                    { return precisionMode.load(); }
+    /** Delay added to every track so that microphones arriving after the main array can be lined up (ms). */
+    double sessionShiftMs() const noexcept            { return sessionShift.load(); }
 
     // Editing (message thread).
     MicState getMic (int slot) const;
@@ -300,6 +308,7 @@ private:
         int firLength = 0;
         juce::int64 firSignature = 0;
         double alignL = 0.0, alignR = 0.0; // alignment delays alone, in samples, for the sum check
+        double advanceMs = 0.0;            // how far this microphone needs moving earlier than the main array
 
         // analysis thread only
         DelayEstimator estimator[kNumRefs], estimatorRight[kNumRefs];
@@ -344,6 +353,8 @@ private:
     void shareWithPartner (int slot);                                 // stateLock held
     void recompute (int slot);                                        // stateLock held
     void recomputeAll();                                              // stateLock held
+    void recomputeOne (int slot);                                     // stateLock held
+    bool updateShift();                                               // stateLock held
     void place (int slot);                                            // stateLock held
 
     std::array<Slot, maxSlots> slots;
@@ -352,7 +363,7 @@ private:
     std::atomic<bool> analysing { false }, resetRequested { false }, bypassAll { false }, matchOn { false };
     std::atomic<float> matchGain { 1.0f };
     std::atomic<int> precisionMode { 0 }, soloSlot { -1 }, activeSnapshot { 0 };
-    std::atomic<double> analysedTime { 0.0 };
+    std::atomic<double> analysedTime { 0.0 }, sessionShift { 0.0 };
     std::atomic<bool> checkActive { false };
     std::atomic<int> checkFocus { -1 }, detailSlot { -1 }, detailRef { 0 }, refinePassesLeft { 0 }, refinePassesTotal { 0 };
     std::atomic<int> changes { 0 };

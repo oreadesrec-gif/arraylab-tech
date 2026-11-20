@@ -314,6 +314,84 @@ static bool gainCase (const Fft& fft)
                    lined, inverted, quarter, offBy10ms, fixed, nothing);
 }
 
+// Notes rather than noise: at any moment a real instrument sounds a handful of harmonics, not everything at once.
+static std::vector<float> melody (int len, unsigned seed, double lowHz, double highHz, bool oddHarmonics, double noteSeconds, double decay)
+{
+    std::mt19937 rng (seed);
+    std::uniform_real_distribution<double> uni (0.0, 1.0);
+    std::vector<float> v ((size_t) len, 0.0f);
+    int start = 0;
+    while (start < len)
+    {
+        const int dur = (int) (48000.0 * noteSeconds * (0.6 + 0.8 * uni (rng)));
+        const double f0 = lowHz * std::pow (highHz / lowHz, uni (rng));
+        const double level = 0.4 + 0.6 * uni (rng);
+        for (int h = 1; h <= 12; ++h)
+        {
+            if (f0 * h > 9000.0) break;
+            const double amp = level / h * (oddHarmonics && h % 2 == 0 ? 0.15 : 1.0), phase = 2.0 * kPi * uni (rng), w = 2.0 * kPi * f0 * h / 48000.0;
+            for (int i = 0; i < dur && start + i < len; ++i)
+            {
+                const double env = std::min (1.0, i / 480.0) * std::min (1.0, (dur - i) / 960.0) * std::exp (-decay * i / 48000.0);
+                v[(size_t) (start + i)] += (float) (amp * env * std::sin (w * i + phase));
+            }
+        }
+        start += dur;
+    }
+    return v;
+}
+
+// A clarinet with its spot, next to a piano. The clarinet plays in phrases; the piano never stops.
+// The piano's main pair hears the piano loud and the clarinet faintly; the clarinet's spot hears the
+// clarinet loud and the piano as spill. The spot has to be lined up on the clarinet, not on the spill.
+static bool ownSourceCase (const Fft& fft)
+{
+    const int len = 48000 * 60;
+    const auto clarinet = melody (len, 50, 150.0, 900.0, true, 0.45, 0.3);
+    auto piano = melody (len, 51, 60.0, 500.0, false, 0.5, 2.5);
+    const auto pianoRight = melody (len, 52, 200.0, 1200.0, false, 0.3, 3.0);
+    for (int i = 0; i < len; ++i) piano[(size_t) i] += 0.7f * pianoRight[(size_t) i];
+    const auto clarinetAtMain = delayed (clarinet, 350.0), pianoAtSpot = delayed (piano, 90.0);
+    std::vector<float> ref ((size_t) len), tgt ((size_t) len);
+    for (int i = 0; i < len; ++i)
+    {
+        const float playing = (i / 192000) % 2 == 0 ? 1.0f : 0.0f; // four seconds on, four seconds off
+        ref[(size_t) i] = piano[(size_t) i] + 0.25f * playing * clarinetAtMain[(size_t) i];
+        tgt[(size_t) i] = playing * clarinet[(size_t) i] + 0.35f * pianoAtSpot[(size_t) i];
+    }
+
+    FrameSpectrum fx (kFrame), fy (kFrame);
+    DelayEstimator everything, ownOnly;
+    everything.reset (kFrame);
+    ownOnly.reset (kFrame);
+    for (int p = 0; p + kFrame <= len; p += kHop)
+    {
+        fx.compute (fft, ref.data() + p);
+        fy.compute (fft, tgt.data() + p);
+        everything.accumulate (fx, fy, false);
+        ownOnly.accumulate (fx, fy, true);
+    }
+    const SearchRange spot { -8400.0, 144.0 };
+    double gains[2][2];
+    const auto pick = [&] (const DelayEstimator& est, double* gain)
+    {
+        // The delay the plugin would use: the candidate that makes the sum fullest.
+        std::vector<std::complex<float>> scratch;
+        Peak peaks[kMaxPeaks];
+        const int count = est.gainCandidates (fft, kRate, scratch, spot, peaks, kMaxPeaks);
+        double best = -1000.0, lag = 0.0;
+        for (int p = 0; p < count; ++p)
+            if (const double g = est.sumGain (kRate, peaks[p].lag, peaks[p].value < 0 ? -1 : 1); g > best) { best = g; lag = peaks[p].lag; }
+        gain[0] = est.sumGain (kRate, -350.0, 1);
+        gain[1] = est.sumGain (kRate, 90.0, 1);
+        return lag;
+    };
+    const double naive = pick (everything, gains[0]), kept = pick (ownOnly, gains[1]);
+    return report ("the spot's instrument, not the spill", std::abs (naive - 90.0) < 2.0 && std::abs (kept + 350.0) < 2.0,
+                   "all shared: %.1f (clarinet %+.2f dB, spill %+.2f dB)   own source only: %.1f (clarinet %+.2f dB, spill %+.2f dB)",
+                   naive, gains[0][0], gains[0][1], kept, gains[1][0], gains[1][1]);
+}
+
 // Lows arriving later than highs must show as such.
 static bool zoneCase (const Fft& fft)
 {
@@ -387,6 +465,7 @@ int main()
     ok &= hallCase (fft);
     ok &= noiseCurveCase (fft);
     ok &= gainCase (fft);
+    ok &= ownSourceCase (fft);
     ok &= zoneCase (fft);
     ok &= fractionCase();
     ok &= geometryCase();
