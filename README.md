@@ -40,9 +40,14 @@ timeline reporting, latency changes) still needs confirming there.
 
 ## Install (Windows)
 
-Download `ArrayLab-VST3-Windows` from the latest run under the Actions
-tab, unzip, and copy `ArrayLab.vst3` to
-`C:\Program Files\Common Files\VST3\`. Rescan plugins in Pyramix.
+Download [`Update-ArrayLab.bat`](https://github.com/oreadesrec-gif/arraylab-tech/releases/download/latest/Update-ArrayLab.bat)
+once and keep it. Close Pyramix, double-click it, accept the administrator
+prompt: it fetches the newest build and puts `ArrayLab.vst3` in
+`C:\Program Files\Common Files\VST3\`. Run it again for each new version.
+
+By hand: download `ArrayLab-VST3-Windows.zip` from the
+[latest build](https://github.com/oreadesrec-gif/arraylab-tech/releases/tag/latest),
+unzip it into that folder, and rescan plugins in Pyramix.
 
 ## Build locally
 

@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -19,3 +22,26 @@ jobs:
         with:
           name: ArrayLab-VST3-Windows
           path: build/ArrayLab_artefacts/Release/VST3/
+      # A fixed download address for the newest build, used by Update-ArrayLab.bat.
+      - name: Publish latest build
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path build/ArrayLab_artefacts/Release/VST3/ArrayLab.vst3 -DestinationPath ArrayLab-VST3-Windows.zip -Force
+          gh release view latest --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create latest ArrayLab-VST3-Windows.zip Update-ArrayLab.bat --repo $env:GITHUB_REPOSITORY --title "Latest build" --notes "Rebuilt automatically from main. Install it with Update-ArrayLab.bat." --prerelease
+          } else {
+            gh release upload latest ArrayLab-VST3-Windows.zip Update-ArrayLab.bat --repo $env:GITHUB_REPOSITORY --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Check the updater
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          cmd /c Update-ArrayLab.bat "$env:RUNNER_TEMP\vst3test"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path "$env:RUNNER_TEMP\vst3test\ArrayLab.vst3\Contents")) { Write-Error "The updater did not install the plugin"; exit 1 }
+          Get-ChildItem "$env:RUNNER_TEMP\vst3test" -Recurse -File | Select-Object -ExpandProperty FullName
