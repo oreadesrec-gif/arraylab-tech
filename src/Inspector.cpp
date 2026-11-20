@@ -50,6 +50,13 @@ Inspector::Inspector (Hub& h) : hub (h)
     role = &combo ("Role", ui::roleNames(), mic);
     roleHelp = &help ({}, always, 32);
     groupBox = &combo ("Group", {}, mic);
+    partnerBox = &combo ("Pair with", {}, [this]
+    {
+        if (refreshing || slot < 0) return;
+        const int i = partnerBox->getSelectedItemIndex();
+        hub.linkMics (slot, i > 0 && i - 1 < partnerSlots.size() ? partnerSlots[i - 1] : -1);
+    }, notMain);
+    help ("If this mic and another are the two halves of one pair on two tracks, link them: they then share one delay, one polarity and one phase correction.", notMain, 44);
 
     header ("2  WHERE IT IS", notMain);
     x = &slider ("Left / right", -60.0, 60.0, 0.05, " m", mic, notMain);
@@ -67,6 +74,7 @@ Inspector::Inspector (Hub& h) : hub (h)
     header ("3  WHAT WAS MEASURED", notMain);
     measured = &help ({}, notMain, 84);
     measured->setColour (juce::Label::textColourId, ui::text);
+    measureLock = &toggle (mic, notMain);
 
     header ("4  WHAT IS CORRECTED", notMain);
     alignTo = &combo ("Line up with", { "Nearest main mic (first arrival)", "Main L", "Main C", "Main R", "Average of L and R", "Sum of the main array" }, mic, notMain);
@@ -78,16 +86,19 @@ Inspector::Inspector (Hub& h) : hub (h)
     phaseHigh = &slider ("Phase: up to", 200.0, 20000.0, 1.0, " Hz", mic, notMain);
     phaseLow->setSkewFactorFromMidPoint (200.0);
     phaseHigh->setSkewFactorFromMidPoint (2000.0);
+    phaseRotation = &slider ("Phase: turn by hand", -180.0, 180.0, 1.0, deg, mic, notMain);
+    rotationButton.onClick = [this] { phaseRotation->setValue (suggestedRotation, juce::sendNotificationSync); };
+    add ("", rotationButton, 24, notMain);
+    help ("Turns the whole microphone's phase, to the degree; 180 is a polarity flip. It adds to Phase by frequency, so use one or the other. Type a value by double-clicking the slider.", notMain, 44);
     offset = &slider ("Extra delay", -20.0, 60.0, 0.1, " ms", mic, notMain);
     help ("Untick a box to bypass that correction. The Detail view shows the peak chosen and the phase before and after.", notMain);
     note = &help ({}, notMain, 32);
     note->setColour (juce::Label::textColourId, ui::warn);
 
     header ("5  PAN", notMain);
-    panBlocked = &help ({}, cannotPan, 62);
-    panBlocked->setColour (juce::Label::textColourId, ui::warn);
+    panStatus = &help ({}, notMain, 62);
     monoSource = &toggle (mic, stereoTrack);
-    monoSource->setButtonText ("One mic on the left channel of a stereo track");
+    monoSource->setButtonText ("This stereo track carries one mic, on its left channel");
     panOn = &toggle (mic, canPan);
     pan = &slider ("Position", -100.0, 100.0, 1.0, {}, [this] { followPlan->setToggleState (false, juce::dontSendNotification); commitMic(); }, canPan);
     pan->textFromValueFunction = [] (double v) { return panText (v * 0.01); };
@@ -96,12 +107,13 @@ Inspector::Inspector (Hub& h) : hub (h)
         const double v = t.retainCharacters ("0123456789.").getDoubleValue();
         return t.containsIgnoreCase ("L") ? -v : v;
     };
+    pairWidth = &slider ("Width", 0.0, 100.0, 1.0, " %", mic, pairOnly);
     followPlan = &toggle (mic, canPan);
     followPlan->setButtonText ("Follow the plan");
-    help (juce::String::fromUTF8 ("Ticked, the pan follows the mic on the plan: straight ahead of the main array is centre, 45\xc2\xb0 to one side is fully that side. Move the slider to set it by hand."), canPan, 58);
-    timeDifference = &toggle (mic, canPan);
+    help (juce::String::fromUTF8 ("Ticked, Position follows the mic on the plan: straight ahead of the main array is centre, 45\xc2\xb0 to one side is fully that side. Move the slider to set it by hand."), canPan, 58);
+    timeDifference = &toggle (mic, monoPan);
     timeDifference->setButtonText ("Line up left and right separately in time");
-    help ("Left is timed on main L and right on main R, instead of both on one reference. Subtle; try it with a spaced main pair.", canPan, 44);
+    help ("Left is timed on main L and right on main R, instead of both on one reference. Subtle; try it with a spaced main pair.", monoPan, 44);
 
     arrayHeader = &header ("2  THE MAIN ARRAY", mainOnly);
     help ("The reference everything else is aligned to. It is never delayed or changed.", mainOnly);
@@ -253,7 +265,8 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
     lastRole = m.role;
 
     const int now = (main ? mainOnly : notMain) | (info->isStereoPair() ? pairOnly : 0) | (info->canPan() ? canPan : 0)
-                  | (! main && info->numIn == 2 ? stereoTrack : 0) | (! main && ! info->canPan() ? cannotPan : 0);
+                  | (! main && info->numIn == 2 ? stereoTrack : 0) | (! main && ! info->canPan() ? cannotPan : 0)
+                  | (info->canPan() && ! info->isStereoPair() ? monoPan : 0);
     if (now != context) { context = now; layout(); }
 
     const auto set = [&] (juce::Slider* s, double v) { if (changedSelection || ! busy (*s)) s->setValue (v, juce::dontSendNotification); };
@@ -269,6 +282,21 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
         for (int g = 0; g < scene.numGroups; ++g) groupBox->addItem (scene.groupNames[g], g + 1);
     }
     pick (role, (int) m.role); pick (groupBox, m.group);
+    if (changedSelection || ! busy (*partnerBox))
+    {
+        partnerBox->clear (juce::dontSendNotification);
+        partnerSlots.clearQuick();
+        partnerBox->addItem ("(not linked)", 1);
+        int chosen = 0;
+        for (auto& o : mics)
+        {
+            if (o.index == info->index || isMain (o.state.role)) continue;
+            partnerSlots.add (o.index);
+            partnerBox->addItem (o.state.name, partnerSlots.size() + 1);
+            if (o.index == info->partnerIndex) chosen = partnerSlots.size();
+        }
+        partnerBox->setSelectedItemIndex (chosen, juce::dontSendNotification);
+    }
     static const char* roleText[] = {
         "A close microphone. It is delayed so its sound lines up with the main array.",
         "Left microphone of the main array: a reference.", "Right microphone of the main array: a reference.",
@@ -302,6 +330,7 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
         meas << "By zone: lows " << part (zone.lowMs) << ", mids " << part (zone.midMs) << ", highs " << part (zone.highMs);
     }
     measured->setText (meas.isEmpty() ? "Nothing yet. Press Analyze, then play the music." : meas.trimEnd(), juce::dontSendNotification);
+    tick (measureLock, m.measureLocked, m.measureLocked ? "Locked: Analyze and Reset leave this mic alone" : "Lock this measurement");
 
     // 4
     pick (alignTo, (int) m.alignTo);
@@ -312,22 +341,36 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
     tick (polarityOn, m.polarityOn, "Polarity:  " + juce::String (! m.polarityOn ? "bypassed" : a.polarity < 0 ? "flipped" : "already right"));
     tick (phaseOn, m.phaseOn, "Phase by frequency:  " + juce::String (! m.phaseOn ? "bypassed" : a.phaseTaps > 0 ? "on" : "waiting for a sure analysis"));
     set (phaseAmount, m.phaseAmount * 100.0); set (phaseLow, m.phaseLowHz); set (phaseHigh, m.phaseHighHz);
-    for (auto* c : { phaseAmount, phaseLow, phaseHigh }) c->setEnabled (m.phaseOn);
+    set (phaseRotation, m.phaseRotationDeg);
+    suggestedRotation = a.suggestedRotationDeg;
+    rotationButton.setEnabled (a.hasSuggestedRotation);
+    rotationButton.setButtonText (a.hasSuggestedRotation ? "Set it to the measured " + juce::String (juce::roundToInt (a.suggestedRotationDeg)) + juce::String::fromUTF8 ("\xc2\xb0")
+                                                         : juce::String ("No measured rotation yet"));
+    phaseAmount->setEnabled (m.phaseOn);
     set (offset, m.offsetMs);
     note->setText (a.note, juce::dontSendNotification);
 
     // 5
-    panBlocked->setText ("This track's output is mono, so ArrayLab cannot pan it: use the mixer's panner.\n"
-                         "From its place on the plan, pan it to:  " + panText (a.suggestedPan) + "\n"
-                         "To pan it here, use a stereo track and tick the box below.", juce::dontSendNotification);
+    const bool panning = info->panIsOn();
+    selectedIsPair = pair;
+    panStatus->setColour (juce::Label::textColourId, info->canPan() ? ui::dim : ui::warn);
+    panStatus->setText (! info->canPan() ? "This track leaves the plugin in mono, so ArrayLab cannot pan it: use the mixer's panner. From its place on the plan, the position would be " + panText (a.suggestedPan) + "."
+                        : pair ? juce::String ("A stereo pair. It stays exactly as recorded until you tick the box below. Then Position moves the pair in the image, and Width narrows it.")
+                               : juce::String ("One microphone on a stereo output. Position places it between left and right, like the pan pot of a mixer."),
+                        juce::dontSendNotification);
     monoSource->setToggleState (m.monoSource, juce::dontSendNotification);
-    tick (panOn, m.panOn, "Pan:  " + (m.panOn ? panText (a.pan) + "   (L " + juce::String (juce::Decibels::gainToDecibels (a.gainL, -60.0f), 1)
-                                                  + " / R " + juce::String (juce::Decibels::gainToDecibels (a.gainR, -60.0f), 1) + " dB)"
-                                             : juce::String ("bypassed (centre)")));
+    if (pair)
+        tick (panOn, m.pairPanOn, "Pan this pair:  " + (m.pairPanOn ? panText (a.pan) + ", width " + juce::String (juce::roundToInt (m.pairWidth * 100.0)) + " %" : juce::String ("off, as recorded")));
+    else
+        tick (panOn, m.panOn, "Pan:  " + (m.panOn ? panText (a.pan) + "   (L " + juce::String (juce::Decibels::gainToDecibels (a.gainL, -60.0f), 1)
+                                                      + " / R " + juce::String (juce::Decibels::gainToDecibels (a.gainR, -60.0f), 1) + " dB)"
+                                                 : juce::String ("bypassed (centre)")));
     set (pan, a.pan * 100.0);
+    set (pairWidth, m.pairWidth * 100.0);
     followPlan->setToggleState (m.panFollowsPlan, juce::dontSendNotification);
     timeDifference->setToggleState (m.timeDifference, juce::dontSendNotification);
-    for (juce::Component* c : { (juce::Component*) pan, (juce::Component*) followPlan, (juce::Component*) timeDifference }) c->setEnabled (m.panOn);
+    for (juce::Component* c : { (juce::Component*) pan, (juce::Component*) pairWidth, (juce::Component*) followPlan, (juce::Component*) timeDifference })
+        c->setEnabled (panning);
 
     // Main array of this microphone's group, and session.
     const auto& arr = scene.arrays[group];
@@ -364,7 +407,10 @@ void Inspector::commitMic()
         m.phaseAmount = phaseAmount->getValue() * 0.01;
         m.phaseLowHz = phaseLow->getValue();
         m.phaseHighHz = juce::jmax (phaseHigh->getValue(), m.phaseLowHz * 1.5);
-        m.panOn = panOn->getToggleState();
+        m.phaseRotationDeg = phaseRotation->getValue();
+        m.measureLocked = measureLock->getToggleState();
+        if (selectedIsPair) m.pairPanOn = panOn->getToggleState(); else m.panOn = panOn->getToggleState();
+        m.pairWidth = pairWidth->getValue() * 0.01;
         m.panFollowsPlan = followPlan->getToggleState();
         if (! m.panFollowsPlan) m.pan = pan->getValue() * 0.01;
         m.timeDifference = timeDifference->getToggleState();

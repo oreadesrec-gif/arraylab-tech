@@ -210,8 +210,89 @@ static bool phaseCase (const Fft& fft)
     int trusted = 0;
     for (float t : curve.trust) trusted += t > 0.9f ? 1 : 0;
     const double before = match (nullptr), after = match (&taps), partial = match (&lowOnly);
-    return report ("phase per 1/12 octave", after > 0.985 && partial > before + 0.05 && partial < after - 0.05 && trusted > 90,
+    return report ("phase per 1/12 octave", after > 0.97 && partial > before + 0.05 && partial < after - 0.05 && trusted > 90,
                    "match: delay only %.3f, range to 500 Hz %.3f, full %.3f; %d of %d bands trusted", before, partial, after, trusted, kFineBands);
+}
+
+// Convolution with a long response, for a room.
+static std::vector<float> convolve (const std::vector<float>& x, const std::vector<float>& h)
+{
+    const int size = 131072, block = size / 2;
+    Fft big (size);
+    std::vector<std::complex<float>> hf ((size_t) size), buf ((size_t) size);
+    for (size_t i = 0; i < h.size(); ++i) hf[i] = { h[i], 0.0f };
+    big.forward (hf.data());
+    std::vector<float> y (x.size() + h.size(), 0.0f);
+    for (size_t start = 0; start < x.size(); start += (size_t) block)
+    {
+        std::fill (buf.begin(), buf.end(), std::complex<float> {});
+        for (size_t i = 0; i < (size_t) block && start + i < x.size(); ++i) buf[i] = { x[start + i], 0.0f };
+        big.forward (buf.data());
+        for (size_t i = 0; i < (size_t) size; ++i) buf[i] *= hf[i];
+        big.inverse (buf.data());
+        for (size_t i = 0; i < (size_t) size && start + i < y.size(); ++i) y[start + i] += buf[i].real();
+    }
+    y.resize (x.size());
+    return y;
+}
+
+// As in a real hall: the main pair hears the instrument's lows as the spot does, but its
+// highs come off the instrument differently, with reverberation and another player on top.
+// Only a small part of the spectrum is shared.
+static bool hallCase (const Fft& fft)
+{
+    const int len = 48000 * 30;
+    const auto own = programme (len, 20), highsAtMain = programme (len, 21), other = programme (len, 22);
+    std::mt19937 rng (23);
+    std::normal_distribution<float> g (0.0f, 1.0f);
+    std::vector<float> tail (48000);
+    for (int i = 0; i < 48000; ++i) tail[(size_t) i] = i < 900 ? 0.0f : g (rng) * std::exp (-i / 9000.0f) * 0.012f; // about 1.3 s of reverberation, a little under the direct sound
+    const auto reverb = convolve (own, tail);
+
+    std::vector<float> ref ((size_t) len, 0.0f), tgt = own;
+    float lp1 = 0, lp2 = 0, hp1 = 0, hp2 = 0;
+    const int delay = 640; // the main pair is 4.6 m further away
+    for (int i = delay; i < len; ++i)
+    {
+        lp1 += 0.12f * (own[(size_t) (i - delay)] - lp1); lp2 += 0.12f * (lp1 - lp2);                 // shared: below about 900 Hz
+        hp1 += 0.12f * (highsAtMain[(size_t) i] - hp1);   hp2 += 0.12f * (hp1 - hp2);
+        ref[(size_t) i] = lp2 + (highsAtMain[(size_t) i] - hp2) + reverb[(size_t) i] + 0.8f * other[(size_t) i];
+    }
+    for (int i = 0; i < len; ++i) tgt[(size_t) i] += 0.3f * other[(size_t) std::max (0, i - 300)];
+
+    DelayEstimator est;
+    feed (est, fft, ref, tgt);
+    std::vector<std::complex<float>> scratch;
+    const SearchRange spot { -8400.0, 144.0 };
+    const auto plain = est.estimate (fft, kRate, scratch, spot, nullptr, false);
+    const auto weighted = est.estimate (fft, kRate, scratch, spot);
+    const auto curve = est.phaseCurve (kRate, weighted.delaySamples, weighted.polarity);
+    double lowTrust = 0.0, highTrust = 0.0;
+    int lows = 0, highs = 0;
+    for (int b = 0; b < kFineBands; ++b)
+    {
+        const double f = bandFrequency (b);
+        if (f > 100.0 && f < 500.0) { lowTrust += curve.trust[b]; ++lows; }
+        if (f > 4000.0 && f < 16000.0) { highTrust += curve.trust[b]; ++highs; }
+    }
+    lowTrust /= lows; highTrust /= highs;
+    // The low-pass that models the shared lows adds about 10 samples of its own delay.
+    const bool ok = weighted.delaySamples < -(delay + 2.0) && weighted.delaySamples > -(delay + 16.0) && weighted.reliable
+                    && weighted.snr > 1.5 * plain.snr && lowTrust > 0.5 && highTrust < 0.02;
+    return report ("hall: only the lows are shared", ok, "delay %.1f (want about -650)  plain: height %.3f snr %.0f  weighted: height %.3f snr %.0f  trust lows %.2f highs %.3f",
+                   weighted.delaySamples, std::abs (plain.peaks[0].value), plain.snr, std::abs (weighted.peaks[0].value), weighted.snr, lowTrust, highTrust);
+}
+
+// Nothing in common: no band of the phase curve may be trusted.
+static bool noiseCurveCase (const Fft& fft)
+{
+    const int len = 48000 * 60; // a long passage: plenty of averages, still nothing to find
+    DelayEstimator est;
+    feed (est, fft, programme (len, 30), programme (len, 31));
+    const auto curve = est.phaseCurve (kRate, -400.0, 1);
+    float most = 0.0f;
+    for (float t : curve.trust) most = std::max (most, t);
+    return report ("unrelated signals: no phase is trusted", most < 0.01f, "highest trust over 111 bands: %.4f", most);
 }
 
 // Lows arriving later than highs must show as such.
@@ -284,6 +365,8 @@ int main()
     ok &= unrelatedCase (fft);
     ok &= gateCase (fft);
     ok &= phaseCase (fft);
+    ok &= hallCase (fft);
+    ok &= noiseCurveCase (fft);
     ok &= zoneCase (fft);
     ok &= fractionCase();
     ok &= geometryCase();

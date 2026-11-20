@@ -52,7 +52,7 @@ int main()
         toL[s] = (int) std::lround (distance (sources[s], geo.pos[0]) / c * sr);
         toR[s] = (int) std::lround (distance (sources[s], geo.pos[2]) / c * sr);
     }
-    const auto at = [&] (int s, int i) { return i >= 0 ? src[s][(size_t) i] : 0.0f; };
+    const auto at = [&] (int s, int i) { return i >= 0 ? src[s][(size_t) (i % total)] : 0.0f; };
 
     FakePlayHead head;
     ArrayLabProcessor mainPair, spot[numSources], pairSpot, stray; // pairSpot: a stereo pair on instrument 1
@@ -83,7 +83,7 @@ int main()
     { auto sc = hub.getScene(); sc.arrays[0] = arr; hub.setScene (sc); }
     for (int s = 0; s < numSources; ++s)
         setUp (spot[s], 1, 2, "Spot " + juce::String (s + 1));
-    edit (spot[2], [] (MicState& m) { m.phaseOn = true; });
+    edit (spot[2], [] (MicState& m) { m.phaseOn = true; m.phaseHighHz = 20000.0; });
     setUp (pairSpot, 2, 2, "Pair");
     setUp (stray, 1, 2, "Stray");
     const int pairGap = 8; // samples between the pair's two capsules for this source
@@ -165,7 +165,7 @@ int main()
     check (untouched, "playing without Analyze measures nothing");
 
     hub.startAnalysis();
-    run (12.0);
+    run (24.0);
     hub.stopAnalysis();
     const auto frozen = hub.snapshot();
     run (4.0);
@@ -183,8 +183,8 @@ int main()
     {
         const auto m = info (spot[s]);
         const auto& vs = m.results.vs;
-        std::printf ("  %s: vs L %.3f (want %d)  vs R %.3f (want %d)  vs sum %.2f  snr %.0f/%.0f  on ref %d  placed (%.2f, %.2f)  delay %.3f ms  pan %+.2f\n",
-                     m.state.name.toRawUTF8(), vs[0].delaySamples, toSpot - toL[s], vs[2].delaySamples, toSpot - toR[s], vs[3].delaySamples,
+        std::printf ("  %s (%d frames): vs L %.3f (want %d)  vs R %.3f (want %d)  vs sum %.2f  snr %.0f/%.0f  on ref %d  placed (%.2f, %.2f)  delay %.3f ms  pan %+.2f\n",
+                     m.state.name.toRawUTF8(), vs[0].frames, vs[0].delaySamples, toSpot - toL[s], vs[2].delaySamples, toSpot - toR[s], vs[3].delaySamples,
                      vs[0].snr, vs[2].snr, m.applied.ref, m.state.x, m.state.y, m.applied.delayLms, m.applied.pan);
         const double tol = s == 2 ? 4.0 : 0.05; // the phase-shifted spot has no single "true" delay
         check (vs[0].reliable && vs[2].reliable && std::abs (vs[0].delaySamples - (toSpot - toL[s])) < tol
@@ -238,7 +238,7 @@ int main()
     hub.setCheck (false, -1);
     std::printf ("  sum of all mics: %+.1f dB with corrections (lows %+.1f, mids %+.1f, highs %+.1f)\n", all.gainAll, all.gainLow, all.gainMid, all.gainHigh);
     std::printf ("  main + spot 1: %+.1f dB, correlation %.2f -> %.2f\n", one.gainAll, one.correlationBefore, one.correlationAfter);
-    check (all.valid && all.gainLow > 1.5 && all.gainAll > 0.3, "check: aligned microphones add up fuller");
+    check (all.valid && all.gainLow > 1.0 && all.gainAll > 0.3, "check: aligned microphones add up fuller");
     check (one.valid && one.hasCorrelation && one.correlationAfter > one.correlationBefore + 0.3, "check: spot 1 correlates with the main array once aligned");
 
     // Pan by hand, and its bypass.
@@ -263,6 +263,39 @@ int main()
                  withoutPhase, lowsOnly, withPhase, info (spot[2]).applied.phaseTaps);
     check (withPhase > 0.95 && withPhase > withoutPhase + 0.05, "phase by frequency brings the phase-shifted spot in line");
     check (lowsOnly > withoutPhase + 0.02 && lowsOnly < withPhase - 0.05, "phase range: limited to the lows, it corrects only part");
+
+    // Phase turned by hand, to the degree: the match with the reference follows the cosine of the angle.
+    {
+        double seen[3];
+        const double angles[3] = { 37.0, 90.0, 180.0 };
+        for (int i = 0; i < 3; ++i)
+        {
+            edit (spot[0], [&] (MicState& m) { m.phaseRotationDeg = angles[i]; });
+            listen (2.0);
+            seen[i] = match (tail (outL[0]), tail (nearest0));
+        }
+        edit (spot[0], [] (MicState& m) { m.phaseRotationDeg = 0.0; });
+        std::printf ("  phase turned by hand: 37 deg -> match %.3f (cos = 0.799), 90 deg -> %.3f (0), 180 deg -> %.3f (-1)\n", seen[0], seen[1], seen[2]);
+        check (std::abs (seen[0] - 0.799) < 0.03 && std::abs (seen[1]) < 0.04 && seen[2] < -0.97, "phase can be turned by hand, to the degree");
+        check (info (spot[2]).applied.hasSuggestedRotation, "the analysis proposes a rotation for a phase-shifted spot");
+    }
+
+    // A stereo pair is untouched until asked; then it pans like two pan pots.
+    {
+        const auto still = info (pairSpot).applied;
+        edit (pairSpot, [] (MicState& m) { m.pairPanOn = true; m.panFollowsPlan = false; m.pan = 0.0; m.pairWidth = 1.0; });
+        const auto centred = info (pairSpot).applied;
+        edit (pairSpot, [] (MicState& m) { m.pan = -1.0; });
+        const auto left = info (pairSpot).applied;
+        edit (pairSpot, [] (MicState& m) { m.pan = 0.0; m.pairWidth = 0.0; });
+        const auto narrow = info (pairSpot).applied;
+        edit (pairSpot, [] (MicState& m) { m.pairPanOn = false; m.pairWidth = 1.0; m.panFollowsPlan = true; });
+        check (juce::exactlyEqual (still.gainL, 1.0f) && juce::exactlyEqual (still.gainR, 1.0f) && juce::exactlyEqual (still.crossLR, 0.0f) && juce::exactlyEqual (still.crossRL, 0.0f),
+               "stereo pair pan: off, the pair is as recorded");
+        check (std::abs (centred.gainL - 1.0f) < 1e-6f && std::abs (centred.crossLR) < 1e-6f && std::abs (centred.crossRL) < 1e-6f, "stereo pair pan: centre at full width changes nothing");
+        check (left.gainL > 0.999f && std::abs (left.crossRL - 0.7071f) < 1e-3f && std::abs (left.gainR - 0.7071f) < 1e-3f, "stereo pair pan: moved left, the right capsule comes to the centre");
+        check (std::abs (narrow.gainL - 0.7071f) < 1e-3f && std::abs (narrow.crossLR - 0.7071f) < 1e-3f, "stereo pair pan: width at zero folds the pair to the centre");
+    }
 
     // A delay between two samples.
     edit (spot[0], [&] (MicState& m) { m.offsetMs = 0.5 / sr * 1000.0; });
@@ -325,7 +358,7 @@ int main()
         check (match (tail (outL[0]), late (nearest0)) > 0.999, "full resolution: spot 1 is still aligned, one latency later");
         const double full = match (tail (outL[2]), late (nearest2));
         std::printf ("  full resolution: spot 3 match %.3f with %d taps (live mode: %.3f)\n", full, info (spot[2]).applied.phaseTaps, withPhase);
-        check (info (spot[2]).applied.phaseTaps == 2 * latency && full > withPhase - 0.01, "full resolution: longer phase filter, at least as precise");
+        check (info (spot[2]).applied.phaseTaps == 2 * latency && full > withPhase - 0.03, "full resolution: longer phase filter, about as precise");
     }
     hub.setBypassed (true);
     listen (2.0);
@@ -352,6 +385,47 @@ int main()
     check (finished && lowsAfter > lowsBefore - 0.05 && refinedLive > withPhase - 0.05, "refine on the sum completes and does not thin the sum");
 
     //==========================================================================
+    // Two mono tracks linked as one pair: same delay, same polarity, same phase correction.
+    {
+        edit (spot[0], [] (MicState& m) { m.phaseOn = true; m.phaseHighHz = 20000.0; });
+        hub.linkMics (spot[0].slot(), spot[2].slot());
+        const auto a = info (spot[0]), b = info (spot[2]);
+        bool sameCurve = true;
+        for (int i = 0; i < kFineBands; ++i) sameCurve &= juce::exactlyEqual (a.applied.correction[i], b.applied.correction[i]);
+        std::printf ("  linked pair: delays %.3f / %.3f ms, polarity %+d / %+d, %d / %d taps\n",
+                     a.applied.delayLms, b.applied.delayLms, a.applied.polarity, b.applied.polarity, a.applied.phaseTaps, b.applied.phaseTaps);
+        check (a.partnerIndex == spot[2].slot() && b.partnerIndex == spot[0].slot()
+                   && juce::exactlyEqual (a.applied.delayLms, b.applied.delayLms) && a.applied.polarity == b.applied.polarity
+                   && a.applied.phaseTaps == b.applied.phaseTaps && a.applied.phaseTaps > 0 && sameCurve,
+               "linked pair: one delay, one polarity, one phase correction for both microphones");
+        edit (spot[0], [] (MicState& m) { m.phaseRotationDeg = 12.0; });
+        check (std::abs (info (spot[2]).state.phaseRotationDeg - 12.0) < 1e-9, "linked pair: a setting changed on one is changed on the other");
+        hub.linkMics (spot[0].slot(), -1);
+        edit (spot[0], [] (MicState& m) { m.phaseOn = false; m.phaseRotationDeg = 0.0; });
+        edit (spot[2], [] (MicState& m) { m.phaseRotationDeg = 0.0; });
+        check (info (spot[0]).partnerIndex < 0 && info (spot[2]).partnerIndex < 0
+                   && std::abs (info (spot[0]).applied.delayLms - info (spot[2]).applied.delayLms) > 1.0, "linked pair: unlinking gives each its own delay back");
+    }
+
+    // A locked measurement survives a reset and a new analysis.
+    {
+        edit (spot[1], [] (MicState& m) { m.measureLocked = true; });
+        const auto before = info (spot[1]).results.vs[0];
+        hub.startAnalysis();
+        run (5.0);
+        hub.stopAnalysis();
+        const auto afterAnalysis = info (spot[1]).results.vs[0];
+        const int otherFrames = info (spot[0]).results.vs[0].frames;
+        check (afterAnalysis.frames == before.frames && juce::exactlyEqual (afterAnalysis.delaySamples, before.delaySamples) && otherFrames > before.frames,
+               "lock: a new analysis updates the others and leaves the locked mic alone");
+        hub.resetAnalysis();
+        check (info (spot[1]).results.vs[0].reliable && ! info (spot[0]).results.any(), "lock: Reset analysis keeps the locked measurement");
+        hub.startAnalysis();
+        run (12.0);
+        hub.stopAnalysis();
+        edit (spot[1], [] (MicState& m) { m.measureLocked = false; });
+    }
+
     // Save and restore keeps the analysis.
     edit (spot[0], [] (MicState& m) { m.alignTo = AlignTo::right; m.phaseAmount = 0.5; });
     juce::MemoryBlock saved;

@@ -125,7 +125,7 @@ private:
     std::vector<float> ring[2];
     int ringMask = 0, writePos = 0;
     DelayTap tap[2];
-    juce::SmoothedValue<float> gain[2];
+    juce::SmoothedValue<float> gain[2], cross[2];
     juce::dsp::Convolution phaseFilter { juce::dsp::Convolution::Latency { 0 } };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ArrayLabProcessor)

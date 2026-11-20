@@ -19,11 +19,25 @@ double smoothstep (double x, double lo, double hi)
 
 double phaseTrust (double coherence, double averages)
 {
-    if (coherence < 0.03 || averages < 1.0)
+    if (averages < 2.0)
         return 0.0;
+
+    // Two signals with nothing in common still show a coherence of about 1/sqrt(averages).
+    // A reading has to stand well clear of that before its phase means anything.
     const double g2 = std::min (coherence * coherence, 0.999999);
-    const double sigma = std::sqrt ((1.0 - g2) / (2.0 * averages * g2)); // standard error of the phase, radians
-    return 1.0 - smoothstep (sigma, 0.12, 0.5);
+    const double clean = (g2 - 1.0 / averages) / (1.0 - 1.0 / averages);
+    if (clean <= 0.0)
+        return 0.0;
+    const double significant = smoothstep (coherence * std::sqrt (averages), 3.0, 6.0);
+
+    // Standard error of the phase, radians.
+    const double sigma = std::sqrt ((1.0 - clean) / (2.0 * averages * clean));
+    const double precise = 1.0 - smoothstep (sigma, 0.12, 0.5);
+
+    // Where the two microphones barely share anything, lining up their phase gains nothing
+    // in the sum and only colours the spot: leave those bands alone.
+    const double worthwhile = smoothstep (std::sqrt (clean), 0.08, 0.3);
+    return significant * precise * worthwhile;
 }
 
 FrameSpectrum::FrameSpectrum (int frameSize) : data ((size_t) frameSize), window ((size_t) frameSize)
@@ -101,33 +115,88 @@ bool DelayEstimator::accumulate (const FrameSpectrum& ref, const FrameSpectrum& 
 }
 
 DelayResult DelayEstimator::estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& c,
-                                      SearchRange range, CorrelationCurve* curve) const
+                                      SearchRange range, CorrelationCurve* curve, bool weighted) const
 {
     DelayResult r;
     r.frames = numFrames;
     if (numFrames == 0 || n == 0 || sxy.empty())
         return r;
 
-    c.assign ((size_t) n, {});
     const int kLo = std::max (1, (int) std::ceil (40.0 * n / sampleRate));
     const int kHi = std::min (n / 2 - 1, (int) std::floor (16000.0 * n / sampleRate));
     if (kHi <= kLo)
         return r;
 
-    for (int k = kLo; k <= kHi; ++k)
-    {
-        const double den = std::sqrt ((double) sxx[(size_t) k] * (double) syy[(size_t) k]);
-        if (den <= 0.0) continue;
-        const auto w = std::complex<double> (sxy[(size_t) k]) / den; // complex coherence, |w| <= 1
-        c[(size_t) k] = { (float) w.real(), (float) w.imag() };
-        c[(size_t) (n - k)] = std::conj (c[(size_t) k]);
-    }
-    fft.inverse (c.data());
-
     const int lo = (int) std::ceil (std::max (range.minLag, -(double) (n / 2 - 2)));
     const int hi = (int) std::floor (std::min (range.maxLag, (double) (n / 2 - 2)));
     if (hi < lo)
         return r;
+
+    // First pass: every frequency counts the same (SCOT).
+    const auto correlate = [&] (const std::vector<float>* weight)
+    {
+        c.assign ((size_t) n, {});
+        for (int k = kLo; k <= kHi; ++k)
+        {
+            const double den = std::sqrt ((double) sxx[(size_t) k] * (double) syy[(size_t) k]);
+            if (den <= 0.0) continue;
+            const auto w = std::complex<double> (sxy[(size_t) k]) / den * (weight != nullptr ? (double) (*weight)[(size_t) k] : 1.0);
+            c[(size_t) k] = { (float) w.real(), (float) w.imag() };
+            c[(size_t) (n - k)] = std::conj (c[(size_t) k]);
+        }
+        fft.inverse (c.data());
+    };
+    correlate (nullptr);
+
+    // Second pass. In a real room two microphones only resemble each other over part of the
+    // spectrum, often the lows and mids; elsewhere the first pass adds nothing but noise.
+    // Measure where they agree around the first answer, and let those frequencies decide.
+    if (weighted)
+    {
+        double first = 0.0;
+        int firstLag = lo;
+        for (int i = lo; i <= hi; ++i)
+            if (const double v = std::abs ((double) c[(size_t) ((i + n) % n)].real()); v > first) { first = v; firstLag = i; }
+
+        const int group = 8, numGroups = (n / 2) / group;
+        const double averages = std::max (2.0, numFrames * group / 3.0);
+        std::vector<double> agree ((size_t) numGroups + 1, 0.0); // running total, for quick averages
+        const auto step = std::polar (1.0, 2.0 * kPi * firstLag / n);
+        auto turn = std::complex<double> (1.0, 0.0);
+        for (int g = 0; g < numGroups; ++g)
+        {
+            std::complex<double> sum {};
+            double xx = 0.0, yy = 0.0;
+            for (int k = g * group; k < (g + 1) * group; ++k)
+            {
+                sum += std::complex<double> (sxy[(size_t) k]) * turn;
+                xx += sxx[(size_t) k];
+                yy += syy[(size_t) k];
+                turn *= step;
+            }
+            const double g2 = xx > 0.0 && yy > 0.0 ? std::norm (sum) / (xx * yy) : 0.0;
+            agree[(size_t) g + 1] = agree[(size_t) g] + (g2 - 1.0 / averages) / (1.0 - 1.0 / averages);
+        }
+
+        std::vector<float> weight ((size_t) n / 2 + 1, 0.0f);
+        double total = 0.0;
+        const double spread = std::pow (2.0, 1.0 / 6.0); // smooth over a third of an octave
+        for (int g = 0; g < numGroups; ++g)
+        {
+            const int g0 = std::clamp ((int) std::floor ((g + 0.5) / spread - 0.5), 0, numGroups - 1);
+            const int g1 = std::clamp ((int) std::ceil ((g + 0.5) * spread - 0.5), g0, numGroups - 1);
+            const double clean = std::clamp ((agree[(size_t) g1 + 1] - agree[(size_t) g0]) / (g1 - g0 + 1), 0.0, 0.98);
+            const float w = (float) (clean / (1.0 - clean));
+            for (int k = std::max (g * group, kLo); k < (g + 1) * group && k <= kHi; ++k) { weight[(size_t) k] = w; total += w; }
+        }
+        if (total > 1.0e-6)
+        {
+            const float scale = (float) ((kHi - kLo + 1) / total);
+            for (auto& w : weight) w *= scale;
+            correlate (&weight);
+        }
+    }
+
     const auto at = [&] (int lag) { return (double) c[(size_t) ((lag + n) % n)].real(); };
 
     double best = 0.0;

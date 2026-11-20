@@ -14,7 +14,21 @@ void correctionCurve (const float* phase, const float* trust, const float* trim,
         if (lowHz > bandFrequency (0))               range *= std::clamp ((b - lowPos) / 4.0 + 0.5, 0.0, 1.0);
         if (highHz < bandFrequency (kFineBands - 1)) range *= std::clamp ((highPos - b) / 4.0 + 0.5, 0.0, 1.0);
         range = range * range * (3.0 - 2.0 * range);
-        correction[b] = (float) ((phase[b] * trust[b] + (trim != nullptr ? trim[b] : 0.0f)) * amount * range);
+
+        // A real acoustic phase moves gently with frequency. Average each band with its
+        // neighbours (a third of an octave) as vectors: a jagged stretch cancels itself out.
+        std::complex<double> sum {};
+        double weights = 0.0;
+        for (int i = -2; i <= 2; ++i)
+        {
+            const int nb = b + i;
+            if (nb < 0 || nb >= kFineBands) continue;
+            const double w = 3.0 - std::abs (i);
+            sum += std::polar (w * trust[nb], (double) phase[nb]);
+            weights += w;
+        }
+        const double smoothTrust = std::abs (sum) / weights, smoothPhase = smoothTrust > 1.0e-9 ? std::arg (sum) : 0.0;
+        correction[b] = (float) ((smoothPhase * smoothTrust + (trim != nullptr ? trim[b] : 0.0f)) * amount * range);
     }
 }
 

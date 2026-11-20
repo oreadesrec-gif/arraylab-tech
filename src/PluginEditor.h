@@ -37,7 +37,7 @@ private:
 
     juce::Label title { {}, "ArrayLab" }, status, hint;
     juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Align" }, detailTab { "Detail" }, checkTab { "Check" },
-                     addGroupButton { "+ Group" }, copyButton { "Copy report" };
+                     addGroupButton { "+ Group" }, copyButton { "Copy report" }, lockButton { "Lock all" };
     juce::ToggleButton bypassButton { "Bypass all" };
     juce::ComboBox groupBox;
     StageView stage;

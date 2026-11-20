@@ -52,6 +52,8 @@ void ArrayLabProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         tap[ch].prepare ((int) (sampleRate * 0.02));
         gain[ch].reset (sampleRate, 0.02);
         gain[ch].setCurrentAndTargetValue (1.0f);
+        cross[ch].reset (sampleRate, 0.02);
+        cross[ch].setCurrentAndTargetValue (0.0f);
     }
     phaseFilter.prepare ({ sampleRate, (juce::uint32) samplesPerBlock, 2 });
     setLatencySamples (arraylab::Hub::latencyFor (sharedHub->precision(), sampleRate));
@@ -94,6 +96,8 @@ void ArrayLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const float trim = sharedHub->outputTrim();
     gain[0].setTargetValue (bypass ? live.bypassGainL.load() : live.gainL.load() * trim);
     gain[1].setTargetValue (bypass ? live.bypassGainR.load() : live.gainR.load() * trim);
+    cross[0].setTargetValue (bypass ? 0.0f : live.crossLR.load() * trim); // left capsule into the right bus
+    cross[1].setTargetValue (bypass ? 0.0f : live.crossRL.load() * trim); // right capsule into the left bus
 
     // Multiband phase correction (its latency is already taken out of the delays).
     {
@@ -119,8 +123,9 @@ void ArrayLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         else if (c1 != nullptr)
         {
             r1[(size_t) writePos] = c1[i];
-            c0[i] = tap[0].read (r0, ringMask, writePos) * gain[0].getNextValue();
-            c1[i] = tap[1].read (r1, ringMask, writePos) * gain[1].getNextValue();
+            const float l = tap[0].read (r0, ringMask, writePos), r = tap[1].read (r1, ringMask, writePos);
+            c0[i] = l * gain[0].getNextValue() + r * cross[1].getNextValue();
+            c1[i] = r * gain[1].getNextValue() + l * cross[0].getNextValue();
         }
         else
             c0[i] = tap[0].read (r0, ringMask, writePos) * gain[0].getNextValue();

@@ -189,6 +189,16 @@ void StageView::paint (juce::Graphics& g)
                     juce::Rectangle<float> (c.x - 120.0f, c.y + 30.0f, 240.0f, 14.0f), juce::Justification::centred, false);
     }
 
+    // Linked pairs: a bar between the two microphones.
+    for (auto& m : mics)
+        if (m.partnerIndex > m.index)
+            for (auto& o : mics)
+                if (o.index == m.partnerIndex && (filter < 0 || filter == m.state.group))
+                {
+                    g.setColour (ui::micColour (m.state.colour, m.state.group).withAlpha (0.8f));
+                    g.drawLine ({ toScreen ({ m.state.x, m.state.y }), toScreen ({ o.state.x, o.state.y }) }, 2.0f);
+                }
+
     // Spots, outriggers and ambience microphones.
     for (auto& m : mics)
     {
@@ -202,6 +212,7 @@ void StageView::paint (juce::Graphics& g)
                                                             : juce::String (a.delayLms, 2) + " ms";
         if (a.polarity < 0) sub << juce::String::fromUTF8 ("  \xc3\x98");
         if (a.phaseTaps > 0) sub << juce::String::fromUTF8 ("  \xcf\x86");
+        if (m.state.measureLocked) sub << (sub.isEmpty() ? "" : "  ") << "locked";
         const auto colour = ui::micColour (m.state.colour, m.state.group);
         if (m.isStereoPair())
         {
@@ -234,7 +245,7 @@ void StageView::paint (juce::Graphics& g)
         const auto d = direction (m.state.angleDeg);
         hits.push_back ({ { p.x + 39.0f * (float) d.x, p.y - 39.0f * (float) d.y }, Kind::micHandle, m.index, m.state.group });
 
-        if (m.canPan() && m.state.panOn) // where the pan puts it between left and right
+        if (m.panIsOn()) // where the pan puts it between left and right
         {
             const float lean = (float) juce::jlimit (-1.0, 1.0, a.pan);
             const bool above = -d.y > 0.25;

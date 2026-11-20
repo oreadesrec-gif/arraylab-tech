@@ -28,7 +28,8 @@ struct MicState
     bool delayOn = true, polarityOn = true, phaseOn = false;
     double offsetMs = 0.0;              // added after alignment (lets the main pair lead)
     double phaseAmount = 1.0;           // 0..1: how much of the measured phase is taken out
-    double phaseLowHz = 20.0, phaseHighHz = 20000.0;
+    double phaseLowHz = 20.0, phaseHighHz = 2000.0; // higher up, phase between distant mics is rarely stable
+    double phaseRotationDeg = 0.0;      // turns the whole microphone's phase by hand, to the degree
     bool peakLocked[kNumRefs] {};       // the user picked a delay by hand for this reference
     double peakLag[kNumRefs] {};
 
@@ -39,10 +40,21 @@ struct MicState
     bool timeDifference = false;        // left and right each lined up on their own main microphone
     bool monoSource = false;            // stereo track carrying a mono mic on its left channel
 
+    // A stereo pair is left untouched unless asked: then `pan` moves it and the width narrows it.
+    bool pairPanOn = false;
+    double pairWidth = 1.0;             // 1 = left capsule fully left, right capsule fully right
+
+    bool measureLocked = false;         // Analyze and Reset analysis leave this microphone's results alone
+
     // A spot on a stereo track is a pair: its two capsules sit either side of x/y, aimed around angleDeg.
     double pairSpacingCm = 17.0, pairAngleDeg = 110.0;
 
     int colour = -1;                    // index in the palette, or -1 to follow the group's colour
+
+    // Two mono tracks that are the two microphones of one pair are linked: they then share
+    // one delay, one polarity and one phase correction, so the pair's own image is untouched.
+    juce::int64 uid = 0;                // identifies this microphone across sessions
+    juce::int64 partner = 0;            // uid of the other microphone of the pair, or 0
 };
 
 /** What the analysis measured for one microphone, against main L, C, R and their sum. */
@@ -80,9 +92,13 @@ struct MicApplied
     int ref = -1;                       // reference in use
     double delayLms = 0.0, delayRms = 0.0;
     float gainL = 1.0f, gainR = 1.0f;
+    float crossLR = 0.0f, crossRL = 0.0f; // stereo pair: left capsule into the right bus, and the reverse
+    bool panActive = false;
     int polarity = 1;
     int phaseTaps = 0;
     double pan = 0.0, suggestedPan = 0.0;
+    bool hasSuggestedRotation = false;  // the single rotation that would best line this microphone up
+    double suggestedRotationDeg = 0.0;
     float correction[kFineBands] {};    // phase taken out per band
     juce::String note;
 };
@@ -90,6 +106,7 @@ struct MicApplied
 struct MicInfo
 {
     int index = -1;
+    int partnerIndex = -1;              // slot of the linked microphone, if any
     MicState state;
     MicResults results;
     MicApplied applied;
@@ -98,8 +115,9 @@ struct MicInfo
     bool hasPlayhead = false, playing = false;
 
     bool isStereoPair() const noexcept { return numIn == 2 && ! state.monoSource && ! isMain (state.role); }
-    /** Only a mono source feeding a stereo output can be panned by the plugin. */
-    bool canPan() const noexcept       { return numOut == 2 && (numIn == 1 || state.monoSource) && ! isMain (state.role); }
+    /** Anything that leaves the plugin in stereo can be panned by it. */
+    bool canPan() const noexcept       { return numOut == 2 && ! isMain (state.role); }
+    bool panIsOn() const noexcept      { return canPan() && (isStereoPair() ? state.pairPanOn : state.panOn); }
 };
 
 /** How the microphones add up, with and without the corrections. Levels are those
@@ -155,6 +173,7 @@ public:
         std::atomic<float> delayL { 0.0f }, delayR { 0.0f }; // samples, fractional, session latency included
         std::atomic<float> gainL { 1.0f }, gainR { 1.0f };   // polarity included
         std::atomic<float> bypassGainL { 1.0f }, bypassGainR { 1.0f };
+        std::atomic<float> crossLR { 0.0f }, crossRL { 0.0f }; // stereo pair being panned: left into right, right into left
         std::atomic<int> bypassDelay { 0 };                  // the session latency alone
         std::atomic<bool> phaseOn { false }, fromMono { false };
     };
@@ -190,6 +209,9 @@ public:
     void setScene (const Scene&);
     void setBypassed (bool b)                         { bypassAll = b; ++changes; }
     void setMatchLevel (bool b)                       { matchOn = b; ++changes; }
+    void setAllLocked (bool locked);
+    /** Links two microphones as the two halves of a pair; other < 0 unlinks. */
+    void linkMics (int slot, int other);
     bool matchLevel() const noexcept                  { return matchOn.load(); }
     juce::Array<MicInfo> snapshot() const;
     int changeCount() const noexcept                  { return changes.load(); }
@@ -273,6 +295,8 @@ private:
     bool readFrame (Slot&, int channel, juce::int64 start, int length, float* dest);
     SearchRange rangeFor (Role, double sampleRate) const;
     RefSet refsForGroup (int group, int* arrayGroup = nullptr) const; // stateLock held
+    int partnerOf (int slot) const;                                   // stateLock held
+    void shareWithPartner (int slot);                                 // stateLock held
     void recompute (int slot);                                        // stateLock held
     void recomputeAll();                                              // stateLock held
     void place (int slot);                                            // stateLock held

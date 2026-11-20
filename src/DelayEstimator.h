@@ -95,8 +95,9 @@ public:
         below its recent level (its instrument is not playing, only spill). */
     bool accumulate (const FrameSpectrum& reference, const FrameSpectrum& target);
 
+    /** `weighted` = false keeps to the plain first pass, for comparison. */
     DelayResult estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& scratch,
-                          SearchRange range = {}, CorrelationCurve* curve = nullptr) const;
+                          SearchRange range = {}, CorrelationCurve* curve = nullptr, bool weighted = true) const;
 
     /** Sharpens a delay to a fraction of a sample from the slope of the phase. */
     double refineDelay (double sampleRate, double delaySamples, int polarity) const;

@@ -28,7 +28,7 @@ public:
 
 private:
     // A row is shown only when every condition it needs holds for the selected microphone.
-    enum Need { always = 0, notMain = 1, pairOnly = 2, mainOnly = 4, canPan = 8, stereoTrack = 16, cannotPan = 32 };
+    enum Need { always = 0, notMain = 1, pairOnly = 2, mainOnly = 4, canPan = 8, stereoTrack = 16, cannotPan = 32, monoPan = 64 };
     struct Row { juce::Label* label; juce::Component* control; int height; int need; };
 
     juce::Label& header (const juce::String&, int need = always);
@@ -56,10 +56,13 @@ private:
 
     juce::TextEditor name, groupName;
     Swatches swatches;
-    juce::TextButton placeButton { "Put it where the analysis heard it" };
-    juce::ComboBox *role, *groupBox, *pattern, *arrayType, *arrayPattern, *panLaw, *alignTo, *precision;
-    juce::Slider *x, *y, *z, *angle, *sourceDistance, *pairSpacing, *pairAngle, *offset, *pan, *phaseAmount, *phaseLow, *phaseHigh,
+    juce::TextButton placeButton { "Put it where the analysis heard it" }, rotationButton;
+    bool selectedIsPair = false;
+    double suggestedRotation = 0.0;
+    juce::ComboBox *role, *groupBox, *pattern, *arrayType, *arrayPattern, *panLaw, *alignTo, *precision, *partnerBox;
+    juce::Array<int> partnerSlots;
+    juce::Slider *x, *y, *z, *angle, *sourceDistance, *pairSpacing, *pairAngle, *offset, *pan, *pairWidth, *phaseAmount, *phaseLow, *phaseHigh, *phaseRotation,
                  *spacing, *arrayAngle, *forward, *arrayHeight, *rotation, *temperature;
-    juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource, *followPlan, *timeDifference;
-    juce::Label *roleHelp, *measured, *note, *arrayHeader, *panBlocked;
+    juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource, *followPlan, *timeDifference, *measureLock;
+    juce::Label *roleHelp, *measured, *note, *arrayHeader, *panStatus;
 };

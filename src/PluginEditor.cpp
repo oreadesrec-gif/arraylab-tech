@@ -4,7 +4,7 @@ using namespace arraylab;
 
 namespace
 {
-enum Column { colName = 1, colGroup, colRole, colL, colC, colR, colConf, colApplied, colDelay, colPolarity, colPhase, colPan, colIO };
+enum Column { colName = 1, colGroup, colRole, colL, colC, colR, colConf, colApplied, colDelay, colPolarity, colPhase, colPan, colLock, colIO };
 
 bool main (const arraylab::MicInfo& m) { return arraylab::isMain (m.state.role); }
 
@@ -29,12 +29,13 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     hint.setFont (juce::FontOptions (13.5f));
     for (auto* c : { (juce::Component*) &title, (juce::Component*) &status, (juce::Component*) &hint, (juce::Component*) &analyseButton,
                      (juce::Component*) &resetButton, (juce::Component*) &stageTab, (juce::Component*) &alignTab, (juce::Component*) &checkTab, (juce::Component*) &checkView, (juce::Component*) &detailTab, (juce::Component*) &detailView, (juce::Component*) &addGroupButton,
-                     (juce::Component*) &copyButton, (juce::Component*) &bypassButton, (juce::Component*) &groupBox,
+                     (juce::Component*) &copyButton, (juce::Component*) &lockButton, (juce::Component*) &bypassButton, (juce::Component*) &groupBox,
                      (juce::Component*) &stage, (juce::Component*) &inspector, (juce::Component*) &table })
         addAndMakeVisible (c);
 
     analyseButton.onClick = [this] { if (hub.isAnalysing()) hub.stopAnalysis(); else hub.startAnalysis(); timerCallback(); };
     resetButton.onClick = [this] { hub.resetAnalysis(); timerCallback(); };
+    lockButton.onClick = [this] { hub.setAllLocked (lockButton.getButtonText() == "Lock all"); timerCallback(); };
     bypassButton.onClick = [this] { hub.setBypassed (bypassButton.getToggleState()); };
     copyButton.onClick = [this] { juce::SystemClipboard::copyTextToClipboard (buildReport()); };
     addGroupButton.onClick = [this]
@@ -66,18 +67,19 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     stage.onSelect = [this] (int slot) { select (slot); };
 
     auto& h = table.getHeader();
-    h.addColumn ("Mic", colName, 136);
+    h.addColumn ("Mic", colName, 120);
     h.addColumn ("Group", colGroup, 70);
     h.addColumn ("Role", colRole, 70);
     h.addColumn ("vs L (ms)", colL, 70);
     h.addColumn ("vs C (ms)", colC, 70);
     h.addColumn ("vs R (ms)", colR, 70);
     h.addColumn ("Sure", colConf, 46);
-    h.addColumn ("Applied (ms)", colApplied, 132);
+    h.addColumn ("Applied (ms)", colApplied, 110);
     h.addColumn ("Delay", colDelay, 46);
     h.addColumn ("Polarity", colPolarity, 58);
     h.addColumn ("Phase", colPhase, 48);
     h.addColumn ("Pan", colPan, 44);
+    h.addColumn ("Lock", colLock, 50);
     table.setColour (juce::ListBox::backgroundColourId, ui::panel);
     table.setRowHeight (24);
     table.setVisible (false);
@@ -120,7 +122,7 @@ void ArrayLabEditor::timerCallback()
     mics = hub.snapshot();
     scene = hub.getScene();
 
-    bool found = false, anyMain = false, anyPlaying = false, anyResult = false, anyTimeline = false;
+    bool found = false, anyMain = false, anyPlaying = false, anyResult = false, anyTimeline = false, allLocked = true, anyOther = false;
     for (auto& m : mics)
     {
         found |= m.index == selected;
@@ -128,6 +130,7 @@ void ArrayLabEditor::timerCallback()
         anyPlaying |= m.playing;
         anyTimeline |= m.hasPlayhead;
         anyResult |= m.results.any();
+        if (! isMain (m.state.role)) { anyOther = true; allLocked &= m.state.measureLocked; }
     }
     if (! found) selected = proc.slot();
 
@@ -149,6 +152,8 @@ void ArrayLabEditor::timerCallback()
     analyseButton.setButtonText (analysing ? "Stop   " + timeText (hub.analysedSeconds()) : "Analyze");
     analyseButton.setColour (juce::TextButton::buttonColourId, analysing ? ui::bad.darker (0.3f) : ui::accent.darker (0.5f));
     bypassButton.setToggleState (hub.bypassed(), juce::dontSendNotification);
+    lockButton.setButtonText (anyOther && allLocked ? "Unlock all" : "Lock all");
+    lockButton.setEnabled (anyOther);
 
     status.setText (juce::String (mics.size()) + (mics.size() == 1 ? " mic linked" : " mics linked")
                         + "   |   " + (anyPlaying ? "playing" : "stopped")
@@ -204,7 +209,8 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
         case colDelay:    return main ? "" : m.state.delayOn ? "ON" : "off";
         case colPolarity: return main ? "" : m.state.polarityOn ? "ON" : "off";
         case colPhase:    return main ? "" : m.state.phaseOn ? "ON" : "off";
-        case colPan:      return main ? "" : ! m.canPan() ? "n/a" : m.state.panOn ? "ON" : "off";
+        case colPan:      return main ? "" : ! m.canPan() ? "n/a" : m.panIsOn() ? "ON" : "off";
+        case colLock:     return main ? "" : m.state.measureLocked ? "LOCK" : "-";
         case colIO:       return juce::String (m.numIn) + " > " + juce::String (m.numOut);
         default:          return {};
     }
@@ -213,13 +219,22 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << "ArrayLab 0.4 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
-    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tConfidence\tApplied\tDelay\tPolarity\tPhase\tPan\tIn>Out\tRate\tTimeline\tNote\n";
+    s << "ArrayLab 0.5 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tSure\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
     for (auto& m : mics)
     {
         for (int c = colName; c <= colIO; ++c)
             s << cellText (m, c) << "\t";
         s << juce::String (m.sampleRate / 1000.0, 1) << "k\t" << (m.hasPlayhead ? (m.playing ? "playing" : "stopped") : "no timeline") << "\t" << m.applied.note;
+        if (! main (m) && m.applied.ref >= 0 && m.results.curve[m.applied.ref].valid)
+        {
+            // How far the phase is trusted in the lows, mids and highs, for the reference in use.
+            const auto& curve = m.results.curve[m.applied.ref];
+            double sum[3] {}; int count[3] {};
+            for (int b = 0; b < kFineBands; ++b) { const double f = bandFrequency (b); const int z = f < 250.0 ? 0 : f < 2000.0 ? 1 : 2; sum[z] += curve.trust[b]; ++count[z]; }
+            s << "\ttrust lows " << juce::String (sum[0] / count[0], 2) << " mids " << juce::String (sum[1] / count[1], 2) << " highs " << juce::String (sum[2] / count[2], 2)
+              << " ref " << m.applied.ref << " alignTo " << (int) m.state.alignTo << " taps " << m.applied.phaseTaps;
+        }
         for (int r = 0; r < kNumRefs; ++r)
             if (const auto& v = m.results.vs[r]; v.valid && ! main (m))
             {
@@ -246,6 +261,7 @@ void ArrayLabEditor::paintCell (juce::Graphics& g, int row, int column, int w, i
     if (column == colName)  colour = ui::micColour (m.state.colour, m.state.group);
     if (column == colConf) colour = text == "yes" ? ui::good : text == "NO" ? ui::bad : ui::dim;
     if (column >= colDelay && column <= colPan) colour = text == "ON" ? ui::good : ui::dim;
+    if (column == colLock) colour = text == "LOCK" ? ui::warn : ui::dim;
     g.setColour (colour);
     g.setFont (juce::FontOptions (14.0f));
     g.drawText (text, 6, 0, w - 8, h, juce::Justification::centredLeft, true);
@@ -255,13 +271,14 @@ void ArrayLabEditor::cellClicked (int row, int column, const juce::MouseEvent&)
 {
     if (! juce::isPositiveAndBelow (row, rows.size())) return;
     const int slot = rows.getReference (row).index;
-    if (column >= colDelay && column <= colPan && ! isMain (rows.getReference (row).state.role))
+    if (column >= colDelay && column <= colLock && ! isMain (rows.getReference (row).state.role))
     {
         auto m = hub.getMic (slot);
         if (column == colDelay)    m.delayOn = ! m.delayOn;
         if (column == colPolarity) m.polarityOn = ! m.polarityOn;
         if (column == colPhase)    m.phaseOn = ! m.phaseOn;
-        if (column == colPan)      m.panOn = ! m.panOn;
+        if (column == colPan)      { if (rows.getReference (row).isStereoPair()) m.pairPanOn = ! m.pairPanOn; else m.panOn = ! m.panOn; }
+        if (column == colLock)     m.measureLocked = ! m.measureLocked;
         hub.setMic (slot, m);
     }
     select (slot);
@@ -274,10 +291,12 @@ void ArrayLabEditor::resized()
     auto area = getLocalBounds().reduced (10);
     auto top = area.removeFromTop (32);
     title.setBounds (top.removeFromLeft (104));
-    analyseButton.setBounds (top.removeFromLeft (150));
+    analyseButton.setBounds (top.removeFromLeft (124));
     top.removeFromLeft (6);
-    resetButton.setBounds (top.removeFromLeft (120));
-    top.removeFromLeft (12);
+    resetButton.setBounds (top.removeFromLeft (112));
+    top.removeFromLeft (6);
+    lockButton.setBounds (top.removeFromLeft (84));
+    top.removeFromLeft (10);
     bypassButton.setBounds (top.removeFromLeft (100));
     copyButton.setBounds (top.removeFromRight (100));
     top.removeFromRight (10);
