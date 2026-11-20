@@ -261,41 +261,92 @@ DelayResult DelayEstimator::estimate (const Fft& fft, double sampleRate, std::ve
     return r;
 }
 
+/** Cross- and auto-spectra of one 1/12 octave, the cross-spectrum turned back by `delaySamples`. */
+bool DelayEstimator::band (int b, double sampleRate, double delaySamples, std::complex<double>& cross, double& xx, double& yy, int& bins) const
+{
+    static const double edge = std::pow (2.0, 1.0 / 24.0);
+    cross = {};
+    xx = yy = 0.0;
+    bins = 0;
+    const double f = bandFrequency (b);
+    if (sxy.empty() || f > 0.47 * sampleRate)
+        return false;
+
+    int k0 = (int) std::ceil (f / edge * n / sampleRate), k1 = (int) std::floor (f * edge * n / sampleRate);
+    if (k1 < k0) k0 = k1 = (int) std::lround (f * n / sampleRate);
+    k0 = std::clamp (k0, 1, n / 2 - 1);
+    k1 = std::clamp (k1, 1, n / 2 - 1);
+
+    const auto step = std::polar (1.0, 2.0 * kPi * delaySamples / n);
+    auto turn = std::polar (1.0, 2.0 * kPi * delaySamples * k0 / n);
+    for (int k = k0; k <= k1; ++k)
+    {
+        cross += std::complex<double> (sxy[(size_t) k]) * turn;
+        xx += sxx[(size_t) k];
+        yy += syy[(size_t) k];
+        turn *= step;
+    }
+    bins = k1 - k0 + 1;
+    return xx > 0.0 && yy > 0.0;
+}
+
 /** Complex coherence per 1/12 octave, turned back by `delaySamples` and `polarity`:
     what is left is the phase a plain delay cannot explain. */
 void DelayEstimator::transfer (double sampleRate, double delaySamples, int polarity, std::complex<double>* gamma, double* averages) const
 {
-    const double edge = std::pow (2.0, 1.0 / 24.0);
     for (int b = 0; b < kFineBands; ++b)
     {
+        std::complex<double> cross;
+        double xx, yy;
+        int bins;
         gamma[b] = {};
         averages[b] = 0.0;
-        const double f = bandFrequency (b);
-        if (sxy.empty() || f > 0.47 * sampleRate)
-            continue;
-
-        int k0 = (int) std::ceil (f / edge * n / sampleRate), k1 = (int) std::floor (f * edge * n / sampleRate);
-        if (k1 < k0) k0 = k1 = (int) std::lround (f * n / sampleRate);
-        k0 = std::clamp (k0, 1, n / 2 - 1);
-        k1 = std::clamp (k1, 1, n / 2 - 1);
-
-        std::complex<double> sum {};
-        double xx = 0.0, yy = 0.0;
-        const auto step = std::polar (1.0, 2.0 * kPi * delaySamples / n);
-        auto turn = std::polar (1.0, 2.0 * kPi * delaySamples * k0 / n);
-        for (int k = k0; k <= k1; ++k)
+        if (band (b, sampleRate, delaySamples, cross, xx, yy, bins))
         {
-            sum += std::complex<double> (sxy[(size_t) k]) * turn;
-            xx += sxx[(size_t) k];
-            yy += syy[(size_t) k];
-            turn *= step;
-        }
-        if (xx > 0.0 && yy > 0.0)
-        {
-            gamma[b] = sum / std::sqrt (xx * yy) * (double) polarity;
-            averages[b] = std::max (1.0, numFrames * (k1 - k0 + 1) / 3.0); // overlapping, windowed frames are not independent
+            gamma[b] = cross / std::sqrt (xx * yy) * (double) polarity;
+            averages[b] = std::max (1.0, numFrames * bins / 3.0); // overlapping, windowed frames are not independent
         }
     }
+}
+
+double DelayEstimator::sumGain (double sampleRate, double lag, int polarity, double rotation, bool limit, double lowHz, double highHz) const
+{
+    if (numFrames == 0 || sxy.empty())
+        return 0.0;
+    const auto turn = std::polar ((double) polarity, rotation);
+    double total = 0.0;
+    int count = 0;
+    for (int b = 0; b < kFineBands; ++b)
+    {
+        const double f = bandFrequency (b);
+        std::complex<double> cross;
+        double xx, yy;
+        int bins;
+        if (f < lowHz || f > highHz || ! band (b, sampleRate, lag, cross, xx, yy, bins))
+            continue;
+        // Power of the sum over the power of the two taken separately: 1 + 2 Re(cross) / (xx + yy).
+        const double shared = limit ? std::abs (cross) : (cross * turn).real();
+        total += 10.0 * std::log10 (std::max (0.05, 1.0 + 2.0 * shared / (xx + yy)));
+        ++count;
+    }
+    return count > 0 ? total / count : 0.0;
+}
+
+std::complex<double> DelayEstimator::sumVector (double sampleRate, double lag, int polarity, double lowHz, double highHz) const
+{
+    std::complex<double> total {};
+    if (numFrames == 0 || sxy.empty())
+        return total;
+    for (int b = 0; b < kFineBands; ++b)
+    {
+        const double f = bandFrequency (b);
+        std::complex<double> cross;
+        double xx, yy;
+        int bins;
+        if (f >= lowHz && f <= highHz && band (b, sampleRate, lag, cross, xx, yy, bins))
+            total += cross * (double) polarity / (xx + yy);
+    }
+    return total;
 }
 
 PhaseCurve DelayEstimator::phaseCurve (double sampleRate, double delaySamples, int polarity) const

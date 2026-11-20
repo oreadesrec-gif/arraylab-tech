@@ -193,7 +193,16 @@ int main()
         if (s != 2) // a phase-shifted signal has no single polarity; its phase filter is checked below
             check ((vs[0].polarity < 0) == (s == 1), m.state.name + ": polarity");
         check (std::hypot (m.state.x - sources[s].x, m.state.y - sources[s].y) < (s == 2 ? 0.8 : 0.3), m.state.name + ": placed on the plan");
-        check (m.applied.ref == (toL[s] <= toR[s] ? 0 : 2), m.state.name + ": lined up with the nearest main microphone");
+        // By default the delay is the candidate that makes the sum fullest: here, one of the two main mics.
+        const auto& best = m.results.best;
+        std::printf ("    sum with the main pair: as recorded %+.2f dB, lined up %+.2f dB, with a %.0f deg rotation %+.2f dB, at most %+.2f dB\n",
+                     best.asRecordedDb, best.gainDb, best.rotationDeg, best.withRotationDb, best.limitDb);
+        if (s != 2)
+            check (best.worthwhile() && best.gainDb > best.asRecordedDb + 0.5
+                       && (std::abs (best.lag - vs[0].delaySamples) < 0.6 || std::abs (best.lag - vs[2].delaySamples) < 0.6)
+                       && std::abs (m.applied.delayLms + 1000.0 * best.lag / sr) < 1e-6, m.state.name + ": delayed where the sum is fullest, and it is worth it");
+        else
+            check (best.valid && best.withRotationDb >= best.gainDb - 0.01 && best.limitDb > best.gainDb + 0.3, m.state.name + ": a phase-shifted spot has more to gain from phase than from delay");
     }
     {
         const auto m = info (pairSpot);
@@ -206,8 +215,14 @@ int main()
     {
         const auto m = info (stray);
         std::printf ("  Stray: snr %.1f, note: %s\n", m.results.vs[0].snr, m.applied.note.toRawUTF8());
-        check (m.results.vs[0].valid && ! m.results.vs[0].reliable && m.applied.delayLms < 1e-9, "unrelated microphone: measured, judged unsure, left alone");
+        check (m.results.vs[0].valid && ! m.results.vs[0].reliable && ! m.results.best.worthwhile() && m.applied.delayLms < 1e-9, "unrelated microphone: nothing to gain, left alone");
     }
+
+    // The rest checks each manual choice in turn, starting from "nearest main microphone".
+    for (auto& p : spot) edit (p, [] (MicState& m) { m.alignTo = AlignTo::nearest; });
+    edit (pairSpot, [] (MicState& m) { m.alignTo = AlignTo::nearest; });
+    for (int s = 0; s < numSources; ++s)
+        check (info (spot[s]).applied.ref == (toL[s] <= toR[s] ? 0 : 2), "Spot " + juce::String (s + 1) + ": by hand, lined up with the nearest main microphone");
 
     //==========================================================================
     // Listen to the result, with the sum check running as the Check view would.

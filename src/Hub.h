@@ -24,7 +24,7 @@ struct MicState
     bool manualPosition = false;        // true once the user has dragged or typed a position
 
     // Alignment.
-    AlignTo alignTo = AlignTo::nearest;
+    AlignTo alignTo = AlignTo::best;
     bool delayOn = true, polarityOn = true, phaseOn = false;
     double offsetMs = 0.0;              // added after alignment (lets the main pair lead)
     double phaseAmount = 1.0;           // 0..1: how much of the measured phase is taken out
@@ -57,9 +57,28 @@ struct MicState
     juce::int64 partner = 0;            // uid of the other microphone of the pair, or 0
 };
 
+/** The delay that makes this microphone's sum with the main array fullest, and what it is worth.
+    All figures are the predicted gain of that sum, in dB (see DelayEstimator::sumGain). */
+struct Benefit
+{
+    bool valid = false;
+    double lag = 0.0;               // delay found best (this mic against the main array, in samples)
+    int polarity = 1;
+    double asRecordedDb = 0.0;      // untouched
+    double gainDb = 0.0;            // delay and polarity
+    double withRotationDb = 0.0;    // plus one phase rotation
+    double limitDb = 0.0;           // if every band's phase were set perfectly
+    double rotationDeg = 0.0;       // that rotation
+
+    /** Under this, lining the microphone up is not worth touching it. */
+    static constexpr double worthwhileDb = 0.2;
+    bool worthwhile() const noexcept { return valid && gainDb - asRecordedDb >= worthwhileDb; }
+};
+
 /** What the analysis measured for one microphone, against main L, C, R and their sum. */
 struct MicResults
 {
+    Benefit best;
     DelayResult vs[kNumRefs];
     DelayResult vsRight[kNumRefs];      // second channel of a stereo spot
     PhaseCurve curve[kNumRefs];
@@ -289,6 +308,7 @@ private:
     void run() override;
     void analyse();
     void readout (const Target&, double sampleRate);
+    void findBest (const Target&, double sampleRate, DelayResult* left, DelayResult* right, Benefit& best);
     void detail();
     void check();
     bool prepareFrame (double sampleRate);

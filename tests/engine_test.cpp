@@ -267,6 +267,7 @@ static bool hallCase (const Fft& fft)
     const auto plain = est.estimate (fft, kRate, scratch, spot, nullptr, false);
     const auto weighted = est.estimate (fft, kRate, scratch, spot);
     const auto curve = est.phaseCurve (kRate, weighted.delaySamples, weighted.polarity);
+    const double asRecorded = est.sumGain (kRate, 0.0, 1), linedUp = est.sumGain (kRate, weighted.delaySamples, weighted.polarity);
     double lowTrust = 0.0, highTrust = 0.0;
     int lows = 0, highs = 0;
     for (int b = 0; b < kFineBands; ++b)
@@ -278,9 +279,9 @@ static bool hallCase (const Fft& fft)
     lowTrust /= lows; highTrust /= highs;
     // The low-pass that models the shared lows adds about 10 samples of its own delay.
     const bool ok = weighted.delaySamples < -(delay + 2.0) && weighted.delaySamples > -(delay + 16.0) && weighted.reliable
-                    && weighted.snr > 1.5 * plain.snr && lowTrust > 0.5 && highTrust < 0.02;
-    return report ("hall: only the lows are shared", ok, "delay %.1f (want about -650)  plain: height %.3f snr %.0f  weighted: height %.3f snr %.0f  trust lows %.2f highs %.3f",
-                   weighted.delaySamples, std::abs (plain.peaks[0].value), plain.snr, std::abs (weighted.peaks[0].value), weighted.snr, lowTrust, highTrust);
+                    && weighted.snr > 1.5 * plain.snr && lowTrust > 0.5 && highTrust < 0.02 && linedUp > asRecorded + 0.3;
+    return report ("hall: only the lows are shared", ok, "delay %.1f (want about -650)  snr plain %.0f weighted %.0f  trust lows %.2f highs %.3f  sum %+.2f -> %+.2f dB",
+                   weighted.delaySamples, plain.snr, weighted.snr, lowTrust, highTrust, asRecorded, linedUp);
 }
 
 // Nothing in common: no band of the phase curve may be trusted.
@@ -293,6 +294,23 @@ static bool noiseCurveCase (const Fft& fft)
     float most = 0.0f;
     for (float t : curve.trust) most = std::max (most, t);
     return report ("unrelated signals: no phase is trusted", most < 0.01f, "highest trust over 111 bands: %.4f", most);
+}
+
+// The gain of the sum is the yardstick: +3 dB lined up, about 0 when unrelated, a loss when inverted.
+static bool gainCase (const Fft& fft)
+{
+    const int len = 48000 * 20;
+    const auto ref = programme (len, 40);
+    DelayEstimator same, late, stranger;
+    feed (same, fft, ref, ref);
+    feed (late, fft, ref, delayed (ref, 480.0));
+    feed (stranger, fft, ref, programme (len, 41));
+    const double lined = same.sumGain (kRate, 0.0, 1), inverted = same.sumGain (kRate, 0.0, -1), quarter = same.sumGain (kRate, 0.0, 1, kPi / 2.0);
+    const double offBy10ms = late.sumGain (kRate, 0.0, 1), fixed = late.sumGain (kRate, 480.0, 1), nothing = stranger.sumGain (kRate, 0.0, 1);
+    const bool ok = std::abs (lined - 3.01) < 0.02 && inverted < -10.0 && std::abs (quarter) < 0.05
+                    && offBy10ms < 0.0 && offBy10ms > -3.5 && std::abs (fixed - 3.01) < 0.05 && std::abs (nothing) < 0.1; // off by 10 ms: a comb, thinner than nothing in common
+    return report ("gain of the sum, the yardstick", ok, "lined up %+.2f dB, inverted %+.1f, turned 90 deg %+.2f, 10 ms off %+.2f, then fixed %+.2f, unrelated %+.2f",
+                   lined, inverted, quarter, offBy10ms, fixed, nothing);
 }
 
 // Lows arriving later than highs must show as such.
@@ -367,6 +385,7 @@ int main()
     ok &= phaseCase (fft);
     ok &= hallCase (fft);
     ok &= noiseCurveCase (fft);
+    ok &= gainCase (fft);
     ok &= zoneCase (fft);
     ok &= fractionCase();
     ok &= geometryCase();

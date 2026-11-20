@@ -4,7 +4,7 @@ using namespace arraylab;
 
 namespace
 {
-enum Column { colName = 1, colGroup, colRole, colL, colC, colR, colConf, colApplied, colDelay, colPolarity, colPhase, colPan, colLock, colIO };
+enum Column { colName = 1, colGroup, colRole, colL, colC, colR, colConf, colGain, colApplied, colDelay, colPolarity, colPhase, colPan, colLock, colIO };
 
 bool main (const arraylab::MicInfo& m) { return arraylab::isMain (m.state.role); }
 
@@ -68,12 +68,13 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
 
     auto& h = table.getHeader();
     h.addColumn ("Mic", colName, 120);
-    h.addColumn ("Group", colGroup, 70);
-    h.addColumn ("Role", colRole, 70);
-    h.addColumn ("vs L (ms)", colL, 70);
-    h.addColumn ("vs C (ms)", colC, 70);
-    h.addColumn ("vs R (ms)", colR, 70);
-    h.addColumn ("Sure", colConf, 46);
+    h.addColumn ("Group", colGroup, 60);
+    h.addColumn ("Role", colRole, 66);
+    h.addColumn ("vs L (ms)", colL, 66);
+    h.addColumn ("vs C (ms)", colC, 66);
+    h.addColumn ("vs R (ms)", colR, 66);
+    h.addColumn ("Sure", colConf, 40);
+    h.addColumn ("To gain", colGain, 62);
     h.addColumn ("Applied (ms)", colApplied, 110);
     h.addColumn ("Delay", colDelay, 46);
     h.addColumn ("Polarity", colPolarity, 58);
@@ -203,6 +204,8 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
         case colC:        return main ? "ref" : delay (1);
         case colR:        return main ? "ref" : delay (2);
         case colConf:     return main || m.applied.ref < 0 ? "-" : effectiveResult (m.results, m.state, m.applied.ref, m.isStereoPair()).reliable ? "yes" : "NO";
+        case colGain:     return main || ! m.results.best.valid ? "-" : juce::String (m.results.best.gainDb - m.results.best.asRecordedDb >= 0.0 ? "+" : "")
+                                                                        + juce::String (m.results.best.gainDb - m.results.best.asRecordedDb, 1) + " dB";
         case colApplied:  return main ? "-" : std::abs (m.applied.delayLms - m.applied.delayRms) > 0.005
                                                  ? "L " + juce::String (m.applied.delayLms, 2) + " / R " + juce::String (m.applied.delayRms, 2)
                                                  : juce::String (m.applied.delayLms, 3);
@@ -219,8 +222,8 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << "ArrayLab 0.5 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
-    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tSure\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
+    s << "ArrayLab 0.6 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tSure\tTo gain\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
     for (auto& m : mics)
     {
         for (int c = colName; c <= colIO; ++c)
@@ -235,11 +238,14 @@ juce::String ArrayLabEditor::buildReport() const
             s << "\ttrust lows " << juce::String (sum[0] / count[0], 2) << " mids " << juce::String (sum[1] / count[1], 2) << " highs " << juce::String (sum[2] / count[2], 2)
               << " ref " << m.applied.ref << " alignTo " << (int) m.state.alignTo << " taps " << m.applied.phaseTaps;
         }
+        if (const auto& b = m.results.best; ! main (m) && b.valid)
+            s << "\tbest " << juce::String (1000.0 * b.lag / m.sampleRate, 3) << "ms pol " << b.polarity << " sum asRecorded " << juce::String (b.asRecordedDb, 2)
+              << " linedUp " << juce::String (b.gainDb, 2) << " rot " << juce::String (b.rotationDeg, 0) << "deg " << juce::String (b.withRotationDb, 2) << " limit " << juce::String (b.limitDb, 2);
         for (int r = 0; r < kNumRefs; ++r)
             if (const auto& v = m.results.vs[r]; v.valid && ! main (m))
             {
                 s << "\t[" << r << "] snr " << juce::String (v.snr, 1) << " frames " << v.frames << " peaks";
-                for (int p = 0; p < v.numPeaks; ++p) s << " " << juce::String (1000.0 * v.peaks[p].lag / m.sampleRate, 2) << "ms:" << juce::String (v.peaks[p].value, 2);
+                for (int p = 0; p < v.numPeaks; ++p) s << " " << juce::String (1000.0 * v.peaks[p].lag / m.sampleRate, 2) << "ms:" << juce::String (v.peaks[p].value, 2) << ":" << juce::String (v.peaks[p].gainDb, 1) << "dB";
             }
         s << "\n";
     }
@@ -262,6 +268,7 @@ void ArrayLabEditor::paintCell (juce::Graphics& g, int row, int column, int w, i
     if (column == colConf) colour = text == "yes" ? ui::good : text == "NO" ? ui::bad : ui::dim;
     if (column >= colDelay && column <= colPan) colour = text == "ON" ? ui::good : ui::dim;
     if (column == colLock) colour = text == "LOCK" ? ui::warn : ui::dim;
+    if (column == colGain) colour = m.results.best.worthwhile() ? ui::good : ui::dim;
     g.setColour (colour);
     g.setFont (juce::FontOptions (14.0f));
     g.drawText (text, 6, 0, w - 8, h, juce::Justification::centredLeft, true);

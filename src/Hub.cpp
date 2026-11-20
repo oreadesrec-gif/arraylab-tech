@@ -439,13 +439,43 @@ void Hub::recompute (int slot)
             e[r].polarity = leads ? own[r].polarity : other[r].polarity;
             polarityDiffers |= e[r].valid && own[r].polarity != other[r].polarity;
         }
-        const int ref = alignmentRef (e, m.alignTo);
-        a.ref = ref;
+        int ref = alignmentRef (e, m.alignTo);
 
-        // The delay: from the analysis when it is sure of itself, else from the plan if the user placed the mic.
+        // The delay. By default, the one the analysis found to make the sum with the main array
+        // fullest, and only if that is worth it. A peak picked by hand, or a reference chosen by
+        // hand, takes over.
         double base = 0.0;
-        bool known = false;
-        if (ref >= 0)
+        bool known = false, picked = false;
+        for (auto& o : own) picked |= o.locked;
+        Benefit best = res.best;
+        if (partner >= 0) // a linked pair moves as one block here too
+        {
+            const auto& pb = slots[(size_t) partner].results.best;
+            best.valid = best.valid && pb.valid;
+            best.lag = 0.5 * (best.lag + pb.lag);
+            best.polarity = leads ? best.polarity : pb.polarity;
+            best.gainDb = juce::jmin (best.gainDb, pb.gainDb);
+            best.asRecordedDb = juce::jmax (best.asRecordedDb, pb.asRecordedDb);
+        }
+
+        if (m.alignTo == AlignTo::best && ! picked && best.valid)
+        {
+            // For the phase curve, lean on the main microphone whose own measurement sits closest.
+            ref = -1;
+            for (int r = 0; r < 3; ++r)
+                if (res.vs[r].valid && (ref < 0 || std::abs (res.vs[r].delaySamples - best.lag) < std::abs (res.vs[ref].delaySamples - best.lag)))
+                    ref = r;
+            if (ref >= 0)
+            {
+                own[ref].shift = res.best.lag - res.vs[ref].delaySamples;
+                e[ref].polarity = best.polarity;
+            }
+            base = -best.lag;
+            known = best.worthwhile();
+            if (! known)
+                a.note = "Lining this mic up would change the sum by " + juce::String (best.gainDb - best.asRecordedDb, 2) + " dB: left as recorded.";
+        }
+        else if (ref >= 0)
         {
             const bool mean = m.alignTo == AlignTo::average && e[0].valid && e[2].valid;
             base = mean ? -0.5 * (e[0].delaySamples + e[2].delaySamples) : -e[ref].delaySamples;
@@ -461,6 +491,7 @@ void Hub::recompute (int slot)
         }
         else
             a.note = "Not analysed yet";
+        a.ref = ref;
 
         if (m.delayOn && known)
         {
@@ -530,6 +561,11 @@ void Hub::recompute (int slot)
             {
                 a.hasSuggestedRotation = true;
                 a.suggestedRotationDeg = std::round (-std::arg (sum) * 180.0 / kPi);
+            }
+            if (m.alignTo == AlignTo::best && ! picked && best.valid && partner < 0) // judged on the sum itself
+            {
+                a.hasSuggestedRotation = true;
+                a.suggestedRotationDeg = res.best.rotationDeg;
             }
         }
 
@@ -984,7 +1020,13 @@ void Hub::readout (const Target& t, double sr)
         }
     }
 
+    // 4. Which candidate makes the sum with the main array fullest, and is it worth it?
+    Benefit best;
+    findBest (t, sr, left, right, best);
+
     const juce::ScopedLock l (stateLock);
+    if (best.valid)
+        s.results.best = best;
     for (int r = 0; r < kNumRefs; ++r)
         if (fresh[r])
         {
@@ -993,6 +1035,57 @@ void Hub::readout (const Target& t, double sr)
             s.results.curve[r] = curve[r];
             s.results.zones[r] = zoneDelays (curve[r]);
         }
+}
+
+/** Tries every candidate delay on the yardstick that matters: how much fuller the sum of this
+    microphone and the main array gets. A mono microphone is judged against each main microphone
+    it will be mixed with; a stereo spot, capsule by capsule, left against main L and right against
+    main R, both moved by the same amount. */
+void Hub::findBest (const Target& t, double sr, DelayResult* left, DelayResult* right, Benefit& best)
+{
+    auto& s = slots[(size_t) t.slot];
+    std::vector<const DelayEstimator*> judges;
+    const auto use = [&] (const DelayEstimator& e) { if (e.frames() > 0) judges.push_back (&e); };
+    if (t.pair)
+    {
+        use (s.estimator[0]);       // left capsule with main L
+        use (s.estimatorRight[2]);  // right capsule with main R
+        use (s.estimator[1]);       // both with main C
+        use (s.estimatorRight[1]);
+    }
+    if (judges.empty())
+        for (int r = 0; r < 3; ++r)
+            use (s.estimator[r]);
+    if (judges.empty())
+        return;
+
+    const auto score = [&] (double lag, int polarity, double rotation = 0.0, bool limit = false)
+    {
+        double total = 0.0;
+        for (auto* j : judges) total += j->sumGain (sr, lag, polarity, rotation, limit);
+        return total / (double) judges.size();
+    };
+
+    best.valid = true;
+    best.asRecordedDb = best.gainDb = score (0.0, 1);
+    for (auto* results : { left, right })
+        for (int r = 0; r < kNumRefs; ++r)
+            for (int p = 0; p < juce::jmin (4, results[r].numPeaks); ++p)
+            {
+                auto& peak = results[r].peaks[p];
+                const int polarity = peak.value < 0.0f ? -1 : 1;
+                const double gain = score (peak.lag, polarity);
+                peak.gainDb = (float) gain;
+                if (gain > best.gainDb) { best.gainDb = gain; best.lag = peak.lag; best.polarity = polarity; }
+            }
+
+    // The one rotation that would add most, and the ceiling a perfect phase correction would reach.
+    std::complex<double> direction {};
+    for (auto* j : judges) direction += j->sumVector (sr, best.lag, best.polarity);
+    const double rotation = std::abs (direction) > 0.0 ? -std::arg (direction) : 0.0;
+    best.rotationDeg = std::round (rotation * 180.0 / kPi);
+    best.withRotationDb = score (best.lag, best.polarity, best.rotationDeg * kPi / 180.0);
+    best.limitDb = score (best.lag, best.polarity, 0.0, true);
 }
 
 MicDetail Hub::getDetail() const
@@ -1347,6 +1440,7 @@ juce::ValueTree Hub::saveInstance (int slot) const
     mic.setProperty ("angle", m.angleDeg, nullptr);   mic.setProperty ("sourceDistance", m.sourceDistance, nullptr);
     mic.setProperty ("manualPosition", m.manualPosition, nullptr);
     mic.setProperty ("alignTo", (int) m.alignTo, nullptr);
+    mic.setProperty ("decision", 1, nullptr);
     mic.setProperty ("delayOn", m.delayOn, nullptr);  mic.setProperty ("polarityOn", m.polarityOn, nullptr);
     mic.setProperty ("phaseOn", m.phaseOn, nullptr);  mic.setProperty ("offsetMs", m.offsetMs, nullptr);
     mic.setProperty ("phaseAmount", m.phaseAmount, nullptr); mic.setProperty ("phaseRotation", m.phaseRotationDeg, nullptr);
@@ -1382,6 +1476,18 @@ juce::ValueTree Hub::saveInstance (int slot) const
         }
     }
     res.setProperty ("trim", pack (s.results.phaseTrim, kFineBands), nullptr);
+    {
+        const auto& b = s.results.best;
+        const float values[8] = { b.valid ? 1.0f : 0.0f, (float) b.lag, (float) b.polarity, (float) b.asRecordedDb, (float) b.gainDb,
+                                  (float) b.withRotationDb, (float) b.limitDb, (float) b.rotationDeg };
+        res.setProperty ("best", pack (values, 8), nullptr);
+        for (int r = 0; r < kNumRefs; ++r)
+        {
+            float gains[kMaxPeaks] {};
+            for (int p = 0; p < s.results.vs[r].numPeaks; ++p) gains[p] = s.results.vs[r].peaks[p].gainDb;
+            res.setProperty ("peakGains" + juce::String (r), pack (gains, kMaxPeaks), nullptr);
+        }
+    }
     t.addChild (res, -1, nullptr);
 
     juce::ValueTree sc ("Scene");
@@ -1423,7 +1529,8 @@ void Hub::restoreInstance (int slot, const juce::ValueTree& t)
         m.sourceDistance = mic.getProperty ("sourceDistance", m.sourceDistance);
         m.manualPosition = mic.getProperty ("manualPosition", false);
         // Sessions saved before the reference could be chosen lined spots up on the L/R average.
-        m.alignTo = (AlignTo) juce::jlimit (0, 5, (int) mic.getProperty ("alignTo", (int) AlignTo::average));
+        // Sessions saved before the choice was made on the sum itself move to it.
+        m.alignTo = mic.hasProperty ("decision") ? (AlignTo) juce::jlimit (0, 6, (int) mic.getProperty ("alignTo", (int) AlignTo::best)) : AlignTo::best;
         m.delayOn = mic.getProperty ("delayOn", true);   m.polarityOn = mic.getProperty ("polarityOn", true);
         m.phaseOn = mic.getProperty ("phaseOn", false);  m.offsetMs = mic.getProperty ("offsetMs", 0.0);
         m.phaseAmount = mic.getProperty ("phaseAmount", 1.0); m.phaseRotationDeg = mic.getProperty ("phaseRotation", 0.0);
@@ -1482,6 +1589,19 @@ void Hub::restoreInstance (int slot, const juce::ValueTree& t)
         }
         if (! old)
             unpack (res.getProperty ("trim").toString(), r.phaseTrim, kFineBands);
+        if (res.hasProperty ("best"))
+        {
+            float v[8];
+            unpack (res.getProperty ("best").toString(), v, 8);
+            r.best.valid = v[0] > 0.5f; r.best.lag = v[1]; r.best.polarity = v[2] < 0.0f ? -1 : 1;
+            r.best.asRecordedDb = v[3]; r.best.gainDb = v[4]; r.best.withRotationDb = v[5]; r.best.limitDb = v[6]; r.best.rotationDeg = v[7];
+            for (int i = 0; i < kNumRefs; ++i)
+            {
+                float gains[kMaxPeaks];
+                unpack (res.getProperty ("peakGains" + juce::String (i)).toString(), gains, kMaxPeaks);
+                for (int p = 0; p < r.vs[i].numPeaks; ++p) r.vs[i].peaks[p].gainDb = gains[p];
+            }
+        }
         s.results = r;
     }
 

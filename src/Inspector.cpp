@@ -72,12 +72,12 @@ Inspector::Inspector (Hub& h) : hub (h)
     add ("", placeButton, 24, notMain);
 
     header ("3  WHAT WAS MEASURED", notMain);
-    measured = &help ({}, notMain, 84);
+    measured = &help ({}, notMain, 132);
     measured->setColour (juce::Label::textColourId, ui::text);
     measureLock = &toggle (mic, notMain);
 
     header ("4  WHAT IS CORRECTED", notMain);
-    alignTo = &combo ("Line up with", { "Nearest main mic (first arrival)", "Main L", "Main C", "Main R", "Average of L and R", "Sum of the main array" }, mic, notMain);
+    alignTo = &combo ("Line up with", { "Whatever makes the sum fullest", "Nearest main mic (first arrival)", "Main L", "Main C", "Main R", "Average of L and R", "Sum of the main array" }, mic, notMain);
     delayOn = &toggle (mic, notMain);
     polarityOn = &toggle (mic, notMain);
     phaseOn = &toggle (mic, notMain);
@@ -329,11 +329,22 @@ void Inspector::update (const juce::Array<MicInfo>& mics, const Scene& scene, in
         const auto part = [] (double ms) { return juce::String (std::abs (ms), 2) + (ms >= 0.0 ? " ms late" : " ms early"); };
         meas << "By zone: lows " << part (zone.lowMs) << ", mids " << part (zone.midMs) << ", highs " << part (zone.highMs);
     }
+    if (const auto& best = info->results.best; best.valid)
+    {
+        const auto db = [] (double v) { if (std::abs (v) < 0.05) v = 0.0; return juce::String (v >= 0.0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+        meas = "Sum with the main array, 63 Hz to 4 kHz:\n"
+               "  as recorded " + db (best.asRecordedDb) + ",  lined up " + db (best.gainDb) + "\n"
+               "  with a " + juce::String (juce::roundToInt (best.rotationDeg)) + juce::String::fromUTF8 ("\xc2\xb0") + " rotation " + db (best.withRotationDb)
+               + ",  at the very most " + db (best.limitDb) + "\n"
+               + (best.worthwhile() ? juce::String ("Worth lining up: ") + db (best.gainDb - best.asRecordedDb) + " to gain.\n"
+                                    : juce::String ("Nothing to gain by lining it up.\n"))
+               + meas;
+    }
     measured->setText (meas.isEmpty() ? "Nothing yet. Press Analyze, then play the music." : meas.trimEnd(), juce::dontSendNotification);
     tick (measureLock, m.measureLocked, m.measureLocked ? "Locked: Analyze and Reset leave this mic alone" : "Lock this measurement");
 
     // 4
-    pick (alignTo, (int) m.alignTo);
+    pick (alignTo, m.alignTo == AlignTo::best ? 0 : (int) m.alignTo + 1);
     const bool split = info->numOut == 2 && std::abs (a.delayLms - a.delayRms) > 0.0005;
     tick (delayOn, m.delayOn, "Delay:  " + (m.delayOn ? (split ? "L " + juce::String (a.delayLms, 3) + " / R " + juce::String (a.delayRms, 3) : juce::String (a.delayLms, 3)) + " ms"
                                                         + (a.ref >= 0 ? juce::String (" on ") + refName[a.ref] : juce::String())
@@ -403,7 +414,7 @@ void Inspector::commitMic()
         m.polarityOn = polarityOn->getToggleState();
         m.phaseOn = phaseOn->getToggleState();
         m.offsetMs = offset->getValue();
-        m.alignTo = (AlignTo) juce::jmax (0, alignTo->getSelectedItemIndex());
+        m.alignTo = alignTo->getSelectedItemIndex() <= 0 ? AlignTo::best : (AlignTo) (alignTo->getSelectedItemIndex() - 1);
         m.phaseAmount = phaseAmount->getValue() * 0.01;
         m.phaseLowHz = phaseLow->getValue();
         m.phaseHighHz = juce::jmax (phaseHigh->getValue(), m.phaseLowHz * 1.5);

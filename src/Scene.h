@@ -18,7 +18,7 @@ enum class Role { spot = 0, mainL, mainR, mainC, mainPair, outrigger, ambience }
 enum class Pattern { omni = 0, wideCardioid, cardioid, superCardioid, hyperCardioid, figure8 };
 enum class ArrayType { ab = 0, ortf, nos, xy, blumlein, decca, custom };
 /** Which main microphone a spot is lined up with. */
-enum class AlignTo { nearest = 0, left, centre, right, average, sum };
+enum class AlignTo { nearest = 0, left, centre, right, average, sum, best }; // best: whatever makes the sum fullest
 
 inline bool isMain (Role r) { return r == Role::mainL || r == Role::mainR || r == Role::mainC || r == Role::mainPair; }
 inline double speedOfSound (double tempC) { return 331.3 + 0.606 * tempC; }

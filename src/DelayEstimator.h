@@ -11,6 +11,7 @@ struct Peak
 {
     double lag = 0.0;
     float value = 0.0f;
+    float gainDb = 0.0f; // how much fuller the sum with the main array gets if this delay is used
 };
 
 /** Result of comparing one microphone against a reference. */
@@ -104,11 +105,23 @@ public:
 
     PhaseCurve phaseCurve (double sampleRate, double delaySamples, int polarity) const;
 
+    /** What lining up is for. If this microphone is moved by -lag, given this polarity and
+        turned by `rotation` radians, how much fuller does its sum with the reference get?
+        In dB, averaged over the 1/12 octaves between lowHz and highHz so that no register
+        outweighs another. +3 dB: the two add up perfectly. 0 dB: they have nothing in common.
+        Below 0: they cancel. `limit` = true answers for a perfect phase correction in every band. */
+    double sumGain (double sampleRate, double lag, int polarity, double rotation = 0.0, bool limit = false,
+                    double lowHz = 63.0, double highHz = 4000.0) const;
+
+    /** Direction of the leftover phase, weighted the same way: minus its angle is the best single rotation. */
+    std::complex<double> sumVector (double sampleRate, double lag, int polarity, double lowHz = 63.0, double highHz = 4000.0) const;
+
     int frames() const noexcept { return numFrames; }
     int skipped() const noexcept { return numSkipped; }
 
 private:
     void transfer (double sampleRate, double delaySamples, int polarity, std::complex<double>* gamma, double* averages) const;
+    bool band (int b, double sampleRate, double delaySamples, std::complex<double>& cross, double& xx, double& yy, int& bins) const;
 
     int n = 0, numFrames = 0, numSkipped = 0;
     double recentPeak = 0.0;

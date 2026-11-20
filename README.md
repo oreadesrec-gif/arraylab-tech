@@ -3,7 +3,7 @@
 Time and phase alignment of spot, outrigger and ambience microphones against a
 main pair or Decca tree, measured on the music itself. VST3, aimed at Pyramix.
 
-## Status: 0.4
+## Status: 0.6
 
 One instance per track, one shared window with four views.
 
@@ -16,6 +16,11 @@ One instance per track, one shared window with four views.
   sum; frames where its own instrument is not playing are left out; a spot is
   only searched where it can physically be; and a result whose peak does not
   stand clear of the floor is shown but not applied.
+- **The yardstick**: for every candidate delay, how many dB fuller the sum of
+  the microphone and the main array gets, measured on the music between 63 Hz
+  and 4 kHz. By default the delay used is the one that gains most, and a
+  microphone with less than 0.2 dB to gain is left as recorded. The figure is
+  shown for each microphone and each candidate.
 - **Alignment**: delay to a fraction of a sample, polarity, and phase per
   1/12 octave, each with its own bypass. You choose the reference (nearest
   main mic, L, C, R, their average or their sum), how much of the phase is
@@ -33,7 +38,9 @@ One instance per track, one shared window with four views.
 - **Precision**: Live (no latency) or Full resolution (a longer phase filter;
   every instance reports the same latency to the host).
 - **Stereo spots** are pairs with their own spacing and angle, moved as one
-  block. **Groups**: up to eight, each with its own main array as reference.
+  block and given one phase correction; two mono tracks can be linked as a pair
+  to the same effect. A pair can be panned (position and width). Phase can also
+  be turned by hand, to the degree. A measurement can be locked. **Groups**: up to eight, each with its own main array as reference.
 
 Not yet tried in Pyramix by the author: host behaviour (mono-to-stereo inserts,
 timeline reporting, latency changes) still needs confirming there.

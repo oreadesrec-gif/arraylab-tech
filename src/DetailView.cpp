@@ -108,18 +108,25 @@ void DetailView::paint (juce::Graphics& g)
     const auto& res = mic.results.vs[ref];
     const auto used = effectiveResult (mic.results, mic.state, ref, mic.isStereoPair());
     const auto ms = [&] (double samples) { return 1000.0 * samples / sr; };
+    const auto& best = mic.results.best;
+    const bool byGain = mic.state.alignTo == AlignTo::best && ! used.locked && best.valid;
+    const bool applied = mic.state.delayOn && (mic.applied.delayLms > 0.0 || mic.applied.delayRms > 0.0 || mic.applied.polarity < 0);
+    const double lagInUse = byGain ? best.lag : used.delaySamples;
+    const auto db = [] (double v) { if (std::abs (v) < 0.05) v = 0.0; return juce::String (v >= 0.0 ? "+" : "") + juce::String (v, 1) + " dB"; };
 
     // Headline.
     g.setFont (juce::FontOptions (17.0f, juce::Font::bold));
     juce::String headline;
     if (! res.valid)            { g.setColour (ui::warn); headline = mic.state.name + ": nothing measured against " + refNames[ref] + " yet. Press Analyze, then play."; }
+    else if (byGain && best.worthwhile()) { g.setColour (ui::good); headline = mic.state.name + ": delayed " + juce::String (std::abs (ms (best.lag)), 3) + " ms, its sum with the main array goes from " + db (best.asRecordedDb) + " to " + db (best.gainDb) + "."; }
+    else if (byGain)            { g.setColour (ui::text); headline = mic.state.name + ": nothing to gain by lining it up (" + db (best.gainDb - best.asRecordedDb) + " at best). Left as recorded."; }
     else if (used.locked)       { g.setColour (ui::accent); headline = mic.state.name + ": you picked " + juce::String (std::abs (ms (used.delaySamples)), 3) + " ms " + (used.delaySamples <= 0 ? "before " : "after ") + refNames[ref] + "."; }
     else if (res.reliable)      { g.setColour (ui::good); headline = mic.state.name + " is " + juce::String (std::abs (ms (used.delaySamples)), 3) + " ms " + (used.delaySamples <= 0 ? "before " : "after ") + refNames[ref] + ". The peak is clear (" + juce::String (juce::roundToInt (res.snr)) + " times the floor)."; }
     else                        { g.setColour (ui::bad); headline = mic.state.name + ": no clear peak against " + refNames[ref] + " (" + juce::String (res.snr, 1) + " times the floor, 8 needed). Nothing is applied."; }
     g.drawText (headline, textArea.removeFromTop (24), juce::Justification::left);
     g.setColour (ui::dim);
     g.setFont (juce::FontOptions (12.5f));
-    g.drawText ("Top: how well the two microphones match at each delay. Each dot is a candidate; the ringed one is in use. Click another dot to use it instead."
+    g.drawText ("Top: how well the two microphones match at each delay. Each dot is a candidate, with what it does to the sum; the ringed one is in use. Click another to use it."
                 + juce::String (mic.applied.ref == ref ? "" : "   (This reference is not the one in use for this mic.)"),
                 textArea.removeFromTop (18), juce::Justification::left);
 
@@ -136,7 +143,7 @@ void DetailView::paint (juce::Graphics& g)
         double viewLo = lo, viewHi = hi;
         if (! wholeRange || hi <= lo)
         {
-            viewLo = viewHi = used.delaySamples;
+            viewLo = viewHi = lagInUse;
             for (int p = 0; p < res.numPeaks; ++p) { viewLo = juce::jmin (viewLo, res.peaks[p].lag); viewHi = juce::jmax (viewHi, res.peaks[p].lag); }
             const double pad = juce::jmax (0.003 * sr, 0.25 * (viewHi - viewLo));
             viewLo -= pad; viewHi += pad;
@@ -186,12 +193,19 @@ void DetailView::paint (juce::Graphics& g)
                         plot.reduced (8.0f).removeFromTop (16.0f), juce::Justification::left, false);
         }
 
+        // The delay actually in use, wherever it came from.
+        if (applied && lagInUse >= viewLo && lagInUse <= viewHi)
+        {
+            g.setColour (ui::accent.withAlpha (0.6f));
+            g.drawVerticalLine ((int) xOf (lagInUse), plot.getY(), plot.getBottom());
+        }
+
         for (int p = 0; p < res.numPeaks; ++p)
         {
             const auto& pk = res.peaks[p];
             if (pk.lag < viewLo || pk.lag > viewHi) continue;
             const juce::Point<float> q (xOf (pk.lag), yOf (pk.value));
-            const bool inUse = used.locked ? std::abs (pk.lag - (res.delaySamples + used.shift)) < 1.5 : p == 0;
+            const bool inUse = std::abs (pk.lag - lagInUse) < 1.5;
             g.setColour (ui::line);
             g.drawLine (q.x, plot.getCentreY(), q.x, q.y, 1.0f);
             g.setColour (inUse ? ui::accent : ui::text);
@@ -199,7 +213,7 @@ void DetailView::paint (juce::Graphics& g)
             if (inUse) { g.setColour (ui::text); g.drawEllipse (q.x - 8.5f, q.y - 8.5f, 17.0f, 17.0f, 1.8f); }
             g.setColour (inUse ? ui::text : ui::dim);
             g.setFont (juce::FontOptions (11.5f));
-            g.drawText (juce::String (ms (pk.lag), 2) + " ms  " + juce::String (std::abs (speed * pk.lag / sr), 2) + " m",
+            g.drawText (juce::String (ms (pk.lag), 2) + " ms   sum " + juce::String (pk.gainDb >= 0.0f ? "+" : "") + juce::String (pk.gainDb, 1) + " dB",
                         juce::Rectangle<float> (q.x - 70.0f, pk.value >= 0 ? q.y - 26.0f : q.y + 11.0f, 140.0f, 14.0f), juce::Justification::centred, false);
             markers.push_back ({ q, pk.lag });
         }
