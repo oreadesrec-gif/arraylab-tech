@@ -42,6 +42,7 @@ private:
     void commitMic();
     void commitScene (bool presetChosen);
     static bool busy (juce::Component&);
+    static juce::String panText (double pan);
 
     arraylab::Hub& hub;
     int slot = -1, group = 0, context = -1;
@@ -56,9 +57,9 @@ private:
     juce::TextEditor name, groupName;
     Swatches swatches;
     juce::TextButton placeButton { "Put it where the analysis heard it" };
-    juce::ComboBox *role, *groupBox, *pattern, *arrayType, *arrayPattern, *panLaw;
-    juce::Slider *x, *y, *z, *angle, *sourceDistance, *pairSpacing, *pairAngle, *offset, *panAmount, *timePan,
+    juce::ComboBox *role, *groupBox, *pattern, *arrayType, *arrayPattern, *panLaw, *alignTo, *precision;
+    juce::Slider *x, *y, *z, *angle, *sourceDistance, *pairSpacing, *pairAngle, *offset, *pan, *phaseAmount, *phaseLow, *phaseHigh,
                  *spacing, *arrayAngle, *forward, *arrayHeight, *rotation, *temperature;
-    juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource;
+    juce::ToggleButton *delayOn, *polarityOn, *phaseOn, *panOn, *monoSource, *followPlan, *timeDifference;
     juce::Label *roleHelp, *measured, *note, *arrayHeader, *panBlocked;
 };

@@ -5,11 +5,15 @@
 
 namespace arraylab
 {
-/** Builds the FIR that cancels the residual phase measured in each band.
-    `length` must be a power of two; the filter's latency is length / 2.
-    Bands with weak coherence are corrected less, down to not at all. */
-/** Phase (radians) the filter removes at frequency `f`, already scaled by how far each band is trusted. */
-double residualPhaseAt (const std::complex<float>* bands, double f);
+/** The phase to take out of each 1/12 octave: the measured phase weighted by its
+    trust, plus a trim, scaled by the user's amount and kept to their frequency range. */
+void correctionCurve (const float* phase, const float* trust, const float* trim,
+                      double amount, double lowHz, double highHz, float* correction);
 
-void designPhaseFir (const std::complex<float>* bands, double sampleRate, int length, std::vector<float>& taps);
+/** Response of the correction at `hz` (unit magnitude). */
+std::complex<double> correctionResponse (const float* correction, double hz);
+
+/** Linear-phase-latency FIR that applies the correction. `length` must be a
+    power of two; the filter's latency is length / 2. */
+void designPhaseFir (const float* correction, double sampleRate, int length, std::vector<float>& taps);
 }

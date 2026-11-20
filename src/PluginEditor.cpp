@@ -6,6 +6,8 @@ namespace
 {
 enum Column { colName = 1, colGroup, colRole, colL, colC, colR, colConf, colApplied, colDelay, colPolarity, colPhase, colPan, colIO };
 
+bool main (const arraylab::MicInfo& m) { return arraylab::isMain (m.state.role); }
+
 juce::String timeText (double seconds)
 {
     const int s = (int) seconds;
@@ -14,7 +16,7 @@ juce::String timeText (double seconds)
 }
 
 ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
-    : AudioProcessorEditor (p), proc (p), hub (p.hub()), stage (p.hub()), inspector (p.hub())
+    : AudioProcessorEditor (p), proc (p), hub (p.hub()), stage (p.hub()), inspector (p.hub()), detailView (p.hub())
 {
     setLookAndFeel (&look);
     selected = proc.slot();
@@ -26,7 +28,7 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     hint.setColour (juce::Label::textColourId, ui::warn);
     hint.setFont (juce::FontOptions (13.5f));
     for (auto* c : { (juce::Component*) &title, (juce::Component*) &status, (juce::Component*) &hint, (juce::Component*) &analyseButton,
-                     (juce::Component*) &resetButton, (juce::Component*) &stageTab, (juce::Component*) &alignTab, (juce::Component*) &checkTab, (juce::Component*) &checkView, (juce::Component*) &addGroupButton,
+                     (juce::Component*) &resetButton, (juce::Component*) &stageTab, (juce::Component*) &alignTab, (juce::Component*) &checkTab, (juce::Component*) &checkView, (juce::Component*) &detailTab, (juce::Component*) &detailView, (juce::Component*) &addGroupButton,
                      (juce::Component*) &copyButton, (juce::Component*) &bypassButton, (juce::Component*) &groupBox,
                      (juce::Component*) &stage, (juce::Component*) &inspector, (juce::Component*) &table })
         addAndMakeVisible (c);
@@ -42,7 +44,7 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     };
     groupBox.onChange = [this] { groupFilter = groupBox.getSelectedId() - 2; timerCallback(); };
 
-    for (auto* t : { &stageTab, &alignTab, &checkTab })
+    for (auto* t : { &stageTab, &alignTab, &detailTab, &checkTab })
     {
         t->setClickingTogglesState (true);
         t->setRadioGroupId (1);
@@ -50,10 +52,15 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     }
     stageTab.setConnectedEdges (juce::Button::ConnectedOnRight);
     alignTab.setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
+    detailTab.setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
     checkTab.setConnectedEdges (juce::Button::ConnectedOnLeft);
     stageTab.onClick = [this] { showView (0); };
     alignTab.onClick = [this] { showView (1); };
     checkTab.onClick = [this] { showView (2); };
+    detailTab.onClick = [this] { showView (3); };
+    checkView.onRefine = [this] { hub.startRefine(); };
+    checkView.onClearRefine = [this] { hub.clearRefine(); };
+    checkView.onMatch = [this] (bool on) { hub.setMatchLevel (on); };
     stageTab.setToggleState (true, juce::dontSendNotification);
 
     stage.onSelect = [this] (int slot) { select (slot); };
@@ -75,6 +82,7 @@ ArrayLabEditor::ArrayLabEditor (ArrayLabProcessor& p)
     table.setRowHeight (24);
     table.setVisible (false);
     checkView.setVisible (false);
+    detailView.setVisible (false);
 
     setResizable (true, true);
     setResizeLimits (980, 560, 2400, 1600);
@@ -87,6 +95,7 @@ ArrayLabEditor::~ArrayLabEditor()
 {
     stopTimer();
     hub.setCheck (false, -1);
+    hub.setDetailFocus (-1, 0);
     setLookAndFeel (nullptr);
 }
 
@@ -102,6 +111,7 @@ void ArrayLabEditor::showView (int which)
     stage.setVisible (which == 0);
     table.setVisible (which == 1);
     checkView.setVisible (which == 2);
+    detailView.setVisible (which == 3);
     timerCallback();
 }
 
@@ -117,7 +127,7 @@ void ArrayLabEditor::timerCallback()
         anyMain |= isMain (m.state.role);
         anyPlaying |= m.playing;
         anyTimeline |= m.hasPlayhead;
-        anyResult |= m.results.primary >= 0;
+        anyResult |= m.results.any();
     }
     if (! found) selected = proc.slot();
 
@@ -157,7 +167,13 @@ void ArrayLabEditor::timerCallback()
     for (auto& m : mics) if (m.index == selected) { focusName = m.state.name; focusIsMain = isMain (m.state.role); }
     hub.setCheck (view == 2, checkView.focusOnSelected() && ! focusIsMain ? selected : -1);
     if (view == 2)
-        checkView.update (hub.getCheck(), focusIsMain ? "(select a spot on the Stage or Align view)" : focusName, anyPlaying, hub.bypassed());
+        checkView.update (hub.getCheck(), focusIsMain ? "(select a spot on the Stage or Align view)" : focusName, anyPlaying, hub.bypassed(), hub.matchLevel());
+
+    const MicInfo* shown = nullptr;
+    for (auto& m : mics) if (m.index == selected) shown = &m;
+    hub.setDetailFocus (view == 3 && shown != nullptr && ! focusIsMain ? selected : -1, detailView.shownRef());
+    if (view == 3)
+        detailView.update (shown, scene, hub.getDetail());
 
     stage.update (mics, scene, selected, groupFilter);
     inspector.update (mics, scene, selected);
@@ -170,8 +186,8 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
     const bool main = isMain (m.state.role);
     const auto delay = [&] (int r) -> juce::String
     {
-        const auto v = combinedResult (m.results, r, m.isStereoPair());
-        return v.valid ? juce::String (1000.0 * v.delaySamples / m.sampleRate, 3) + (v.polarity < 0 ? juce::String::fromUTF8 (" \xc3\x98") : juce::String()) : "-";
+        const auto v = effectiveResult (m.results, m.state, r, m.isStereoPair());
+        return v.valid ? juce::String (v.reliable ? "" : "? ") + juce::String (1000.0 * v.delaySamples / m.sampleRate, 3) + (v.polarity < 0 ? juce::String::fromUTF8 (" \xc3\x98") : juce::String()) : "-";
     };
     switch (column)
     {
@@ -181,7 +197,7 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
         case colL:        return main ? "ref" : delay (0);
         case colC:        return main ? "ref" : delay (1);
         case colR:        return main ? "ref" : delay (2);
-        case colConf:     return m.results.primary >= 0 ? juce::String (juce::roundToInt (m.results.vs[m.results.primary].confidence * 100.0)) + " %" : "-";
+        case colConf:     return main || m.applied.ref < 0 ? "-" : effectiveResult (m.results, m.state, m.applied.ref, m.isStereoPair()).reliable ? "yes" : "NO";
         case colApplied:  return main ? "-" : std::abs (m.applied.delayLms - m.applied.delayRms) > 0.005
                                                  ? "L " + juce::String (m.applied.delayLms, 2) + " / R " + juce::String (m.applied.delayRms, 2)
                                                  : juce::String (m.applied.delayLms, 3);
@@ -197,13 +213,20 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << "ArrayLab 0.3 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "ArrayLab 0.4 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
     s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tConfidence\tApplied\tDelay\tPolarity\tPhase\tPan\tIn>Out\tRate\tTimeline\tNote\n";
     for (auto& m : mics)
     {
         for (int c = colName; c <= colIO; ++c)
             s << cellText (m, c) << "\t";
-        s << juce::String (m.sampleRate / 1000.0, 1) << "k\t" << (m.hasPlayhead ? (m.playing ? "playing" : "stopped") : "no timeline") << "\t" << m.applied.note << "\n";
+        s << juce::String (m.sampleRate / 1000.0, 1) << "k\t" << (m.hasPlayhead ? (m.playing ? "playing" : "stopped") : "no timeline") << "\t" << m.applied.note;
+        for (int r = 0; r < kNumRefs; ++r)
+            if (const auto& v = m.results.vs[r]; v.valid && ! main (m))
+            {
+                s << "\t[" << r << "] snr " << juce::String (v.snr, 1) << " frames " << v.frames << " peaks";
+                for (int p = 0; p < v.numPeaks; ++p) s << " " << juce::String (1000.0 * v.peaks[p].lag / m.sampleRate, 2) << "ms:" << juce::String (v.peaks[p].value, 2);
+            }
+        s << "\n";
     }
     return s;
 }
@@ -221,11 +244,7 @@ void ArrayLabEditor::paintCell (juce::Graphics& g, int row, int column, int w, i
     const auto text = cellText (m, column);
     auto colour = ui::text;
     if (column == colName)  colour = ui::micColour (m.state.colour, m.state.group);
-    if (column == colConf && m.results.primary >= 0)
-    {
-        const double c = m.results.vs[m.results.primary].confidence;
-        colour = c > 0.5 ? ui::good : c > 0.2 ? ui::warn : ui::bad;
-    }
+    if (column == colConf) colour = text == "yes" ? ui::good : text == "NO" ? ui::bad : ui::dim;
     if (column >= colDelay && column <= colPan) colour = text == "ON" ? ui::good : ui::dim;
     g.setColour (colour);
     g.setFont (juce::FontOptions (14.0f));
@@ -266,9 +285,10 @@ void ArrayLabEditor::resized()
     top.removeFromRight (6);
     groupBox.setBounds (top.removeFromRight (140));
     top.removeFromRight (12);
-    checkTab.setBounds (top.removeFromRight (64));
-    alignTab.setBounds (top.removeFromRight (64));
-    stageTab.setBounds (top.removeFromRight (64));
+    checkTab.setBounds (top.removeFromRight (60));
+    detailTab.setBounds (top.removeFromRight (60));
+    alignTab.setBounds (top.removeFromRight (56));
+    stageTab.setBounds (top.removeFromRight (56));
     top.removeFromRight (10);
     status.setBounds (top);
 
@@ -279,4 +299,5 @@ void ArrayLabEditor::resized()
     stage.setBounds (area);
     table.setBounds (area);
     checkView.setBounds (area);
+    detailView.setBounds (area);
 }

@@ -3,6 +3,7 @@
 #include "StageView.h"
 #include "Inspector.h"
 #include "CheckView.h"
+#include "DetailView.h"
 
 class ArrayLabEditor : public juce::AudioProcessorEditor,
                        private juce::TableListBoxModel,
@@ -35,13 +36,14 @@ private:
     int selected = -1, groupFilter = -1;
 
     juce::Label title { {}, "ArrayLab" }, status, hint;
-    juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Align" }, checkTab { "Check" },
+    juce::TextButton analyseButton { "Analyze" }, resetButton { "Reset analysis" }, stageTab { "Stage" }, alignTab { "Align" }, detailTab { "Detail" }, checkTab { "Check" },
                      addGroupButton { "+ Group" }, copyButton { "Copy report" };
     juce::ToggleButton bypassButton { "Bypass all" };
     juce::ComboBox groupBox;
     StageView stage;
     Inspector inspector;
     CheckView checkView;
+    DetailView detailView;
     int view = 0;
     juce::TableListBox table { "mics", this };
 

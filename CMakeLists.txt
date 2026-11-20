@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ArrayLab VERSION 0.3.0 LANGUAGES C CXX)
+project(ArrayLab VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +38,8 @@ target_sources(ArrayLab PRIVATE
     src/PluginEditor.cpp
     src/StageView.cpp
     src/Inspector.cpp
-    src/CheckView.cpp)
+    src/CheckView.cpp
+    src/DetailView.cpp)
 
 target_compile_definitions(ArrayLab PUBLIC
     JUCE_WEB_BROWSER=0

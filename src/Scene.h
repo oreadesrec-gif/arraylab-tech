@@ -6,13 +6,19 @@
 namespace arraylab
 {
 constexpr int kMaxGroups = 8;
-constexpr int kNumBands = 24;       // multiband phase resolution, 40 Hz .. 16 kHz
-constexpr double kBandLow = 40.0, kBandHigh = 16000.0;
+constexpr int kNumRefs = 4;         // a microphone is measured against main L, C, R and their sum
+constexpr int kFineBands = 111;     // phase is resolved per 1/12 octave, 31 Hz .. 18 kHz
+constexpr int kMaxPeaks = 6;        // candidate delays kept per measurement
 constexpr double kPi = 3.14159265358979323846;
+
+inline double bandFrequency (int band) { return 31.25 * std::pow (2.0, band / 12.0); }
+inline double bandPosition (double hz)  { return 12.0 * std::log2 (std::max (hz, 1.0e-3) / 31.25); }
 
 enum class Role { spot = 0, mainL, mainR, mainC, mainPair, outrigger, ambience };
 enum class Pattern { omni = 0, wideCardioid, cardioid, superCardioid, hyperCardioid, figure8 };
 enum class ArrayType { ab = 0, ortf, nos, xy, blumlein, decca, custom };
+/** Which main microphone a spot is lined up with. */
+enum class AlignTo { nearest = 0, left, centre, right, average, sum };
 
 inline bool isMain (Role r) { return r == Role::mainL || r == Role::mainR || r == Role::mainC || r == Role::mainPair; }
 inline double speedOfSound (double tempC) { return 331.3 + 0.606 * tempC; }
@@ -137,5 +143,28 @@ inline void panGains (const ArrayGeometry& g, Pattern pattern, Vec2 p, double rL
     const double centre = std::pow (2.0, -1.0 / e);
     gainL = (float) std::max (0.0, centre + amount * (l / norm - centre));
     gainR = (float) std::max (0.0, centre + amount * (r / norm - centre));
+}
+
+/** An ordinary panner: pan from -1 (left) to +1 (right), law 0 = -3 dB, 1 = -4.5 dB, 2 = -6 dB at centre. */
+inline void panLawGains (double pan, int law, float& gainL, float& gainR)
+{
+    const double x = 0.5 * (std::clamp (pan, -1.0, 1.0) + 1.0);
+    const double cl = std::cos (x * kPi * 0.5), cr = std::sin (x * kPi * 0.5);
+    const double l = law == 2 ? 1.0 - x : law == 1 ? std::sqrt (cl * (1.0 - x)) : cl;
+    const double r = law == 2 ? x       : law == 1 ? std::sqrt (cr * x)         : cr;
+    gainL = (float) l;
+    gainR = (float) r;
+}
+
+/** Pan position for a source at `p`, from its direction as seen from the main array:
+    straight ahead is centre (0), 45 degrees to one side or more is fully that side (-1 or +1). */
+inline double naturalPan (const ArrayGeometry& g, Vec2 p)
+{
+    const Vec2 centre { 0.5 * (g.pos[0].x + g.pos[2].x), 0.5 * (g.pos[0].y + g.pos[2].y) };
+    const double dx = p.x - centre.x, dy = p.y - centre.y;
+    const double along = dx * g.forward.x + dy * g.forward.y, across = dx * g.right.x + dy * g.right.y;
+    if (std::hypot (along, across) < 1.0e-6)
+        return 0.0;
+    return std::clamp (std::atan2 (across, std::max (along, 0.0)) / (kPi / 4.0), -1.0, 1.0);
 }
 }

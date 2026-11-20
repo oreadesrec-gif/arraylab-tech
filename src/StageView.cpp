@@ -236,7 +236,7 @@ void StageView::paint (juce::Graphics& g)
 
         if (m.canPan() && m.state.panOn) // where the pan puts it between left and right
         {
-            const float lean = juce::jlimit (-1.0f, 1.0f, (juce::Decibels::gainToDecibels (a.gainR, -60.0f) - juce::Decibels::gainToDecibels (a.gainL, -60.0f)) / 12.0f);
+            const float lean = (float) juce::jlimit (-1.0, 1.0, a.pan);
             const bool above = -d.y > 0.25;
             const float y = above ? p.y - (sub.isEmpty() ? 36.0f : 50.0f) : p.y + (sub.isEmpty() ? 32.0f : 46.0f);
             g.setColour (ui::dim);

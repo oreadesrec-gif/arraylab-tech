@@ -3,22 +3,38 @@
 
 namespace arraylab
 {
-double residualPhaseAt (const std::complex<float>* bands, double f)
+void correctionCurve (const float* phase, const float* trust, const float* trim,
+                      double amount, double lowHz, double highHz, float* correction)
 {
-    static const double step = std::log (kBandHigh / kBandLow) / (kNumBands - 1);
-    const double pos = std::clamp (std::log (std::max (f, 1.0) / kBandLow) / step, 0.0, (double) kNumBands - 1.0);
-    const int b = std::min ((int) pos, kNumBands - 2);
-    const double fr = pos - b;
-    const auto c = std::complex<double> (bands[b]) * (1.0 - fr) + std::complex<double> (bands[b + 1]) * fr;
-
-    // Trust: nothing below 0.2 coherence, everything above 0.6.
-    const double t = std::clamp ((std::abs (c) - 0.2) / 0.4, 0.0, 1.0);
-    double phi = std::arg (c) * t * t * (3.0 - 2.0 * t);
-    if (f < kBandLow) phi *= f / kBandLow; // ease to zero towards DC
-    return phi;
+    // The range fades in and out over a third of an octave rather than cutting off.
+    const double lowPos = bandPosition (lowHz), highPos = bandPosition (highHz);
+    for (int b = 0; b < kFineBands; ++b)
+    {
+        double range = 1.0;
+        if (lowHz > bandFrequency (0))               range *= std::clamp ((b - lowPos) / 4.0 + 0.5, 0.0, 1.0);
+        if (highHz < bandFrequency (kFineBands - 1)) range *= std::clamp ((highPos - b) / 4.0 + 0.5, 0.0, 1.0);
+        range = range * range * (3.0 - 2.0 * range);
+        correction[b] = (float) ((phase[b] * trust[b] + (trim != nullptr ? trim[b] : 0.0f)) * amount * range);
+    }
 }
 
-void designPhaseFir (const std::complex<float>* bands, double sampleRate, int length, std::vector<float>& taps)
+std::complex<double> correctionResponse (const float* correction, double hz)
+{
+    const double pos = bandPosition (hz);
+    if (pos <= 0.0) // ease to nothing towards DC
+        return std::polar (1.0, -(double) correction[0] * std::max (hz, 0.0) / bandFrequency (0));
+    if (pos >= kFineBands - 1)
+        return std::polar (1.0, -(double) correction[kFineBands - 1]);
+
+    // Blend the two neighbouring bands as vectors, so a wrap from +pi to -pi stays harmless.
+    const int b = (int) pos;
+    const double fr = pos - b;
+    const auto v = std::polar (1.0 - fr, -(double) correction[b]) + std::polar (fr, -(double) correction[b + 1]);
+    const double mag = std::abs (v);
+    return mag > 1e-9 ? v / mag : std::complex<double> (1.0, 0.0);
+}
+
+void designPhaseFir (const float* correction, double sampleRate, int length, std::vector<float>& taps)
 {
     Fft fft (length);
     std::vector<std::complex<float>> h ((size_t) length);
@@ -27,8 +43,7 @@ void designPhaseFir (const std::complex<float>* bands, double sampleRate, int le
     h[(size_t) length / 2] = { 1.0f, 0.0f };
     for (int k = 1; k < length / 2; ++k)
     {
-        const double phi = residualPhaseAt (bands, k * sampleRate / length);
-        h[(size_t) k] = { (float) std::cos (-phi), (float) std::sin (-phi) };
+        h[(size_t) k] = std::complex<float> (correctionResponse (correction, k * sampleRate / length));
         h[(size_t) (length - k)] = std::conj (h[(size_t) k]);
     }
 

@@ -14,10 +14,19 @@ ArrayLabProcessor::ArrayLabProcessor()
         phaseFilter.loadImpulseResponse (std::move (ir), getSampleRate(), juce::dsp::Convolution::Stereo::no,
                                          juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::no);
     });
+    startTimerHz (4);
+}
+
+void ArrayLabProcessor::updateLatency()
+{
+    const int wanted = arraylab::Hub::latencyFor (sharedHub->precision(), getSampleRate());
+    if (wanted != getLatencySamples())
+        setLatencySamples (wanted);
 }
 
 ArrayLabProcessor::~ArrayLabProcessor()
 {
+    stopTimer();
     sharedHub->unregisterInstance (slotIndex);
 }
 
@@ -33,7 +42,8 @@ bool ArrayLabProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
 
 void ArrayLabProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    const int size = juce::nextPowerOfTwo ((int) (sampleRate * 0.6)); // room for 0.6 s of delay
+    // Room for 0.6 s of alignment delay plus the full-resolution latency.
+    const int size = juce::nextPowerOfTwo ((int) (sampleRate * 0.6) + arraylab::Hub::latencyFor (1, sampleRate));
     for (auto& r : ring) r.assign ((size_t) size, 0.0f);
     ringMask = size - 1;
     writePos = 0;
@@ -44,6 +54,7 @@ void ArrayLabProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         gain[ch].setCurrentAndTargetValue (1.0f);
     }
     phaseFilter.prepare ({ sampleRate, (juce::uint32) samplesPerBlock, 2 });
+    setLatencySamples (arraylab::Hub::latencyFor (sharedHub->precision(), sampleRate));
     sharedHub->prepare (slotIndex, sampleRate, samplesPerBlock,
                         getTotalNumInputChannels(), getTotalNumOutputChannels());
 }
@@ -75,13 +86,14 @@ void ArrayLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const auto& live = sharedHub->live (slotIndex);
     const bool bypass = sharedHub->bypassed();
     const bool fromMono = live.fromMono.load();
-    const int limit = ringMask;
-    const int dL = bypass ? 0 : juce::jlimit (0, limit, live.delayL.load());
-    const int dR = bypass ? 0 : juce::jlimit (0, limit, live.delayR.load());
-    tap[0].setTarget (dL);
-    tap[1].setTarget (dR);
-    gain[0].setTargetValue (bypass ? live.bypassGainL.load() : live.gainL.load());
-    gain[1].setTargetValue (bypass ? live.bypassGainR.load() : live.gainR.load());
+    // Bypassed, only the session latency remains, so the host's compensation stays valid.
+    const float limit = (float) (ringMask - arraylab::kSincTaps);
+    const float held = (float) live.bypassDelay.load();
+    tap[0].setTarget (juce::jlimit (0.0f, limit, bypass ? held : live.delayL.load()));
+    tap[1].setTarget (juce::jlimit (0.0f, limit, bypass ? held : live.delayR.load()));
+    const float trim = sharedHub->outputTrim();
+    gain[0].setTargetValue (bypass ? live.bypassGainL.load() : live.gainL.load() * trim);
+    gain[1].setTargetValue (bypass ? live.bypassGainR.load() : live.gainR.load() * trim);
 
     // Multiband phase correction (its latency is already taken out of the delays).
     {

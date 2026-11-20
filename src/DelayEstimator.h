@@ -6,6 +6,13 @@
 
 namespace arraylab
 {
+/** One candidate delay: where the correlation peaks, and how high (negative = inverted polarity). */
+struct Peak
+{
+    double lag = 0.0;
+    float value = 0.0f;
+};
+
 /** Result of comparing one microphone against a reference. */
 struct DelayResult
 {
@@ -13,8 +20,47 @@ struct DelayResult
     double delaySamples = 0.0; // > 0: this mic hears the source later than the reference
     int    polarity = 1;       // -1: inverted relative to the reference
     double confidence = 0.0;   // 0..1, share of the spectrum that agrees on this delay
-    int    frames = 0;         // number of analysis frames accumulated
+    int    frames = 0;         // analysis frames that went into it
+    bool   reliable = false;   // the peak stands clear of the floor: safe to apply
+    double snr = 0.0;          // peak height over the correlation floor
+    int    numPeaks = 0;       // candidates, strongest first; peaks[0] is the one chosen
+    Peak   peaks[kMaxPeaks];
 };
+
+/** Delays outside this range are not considered (in samples). */
+struct SearchRange
+{
+    double minLag = -1.0e9, maxLag = 1.0e9;
+};
+
+/** The correlation over the search range, thinned for display. */
+struct CorrelationCurve
+{
+    double minLag = 0.0, maxLag = 0.0;
+    std::vector<float> points;
+};
+
+/** Phase of the microphone against its reference once delay and polarity are taken out,
+    per 1/12 octave, and how far each value can be trusted (0..1). */
+struct PhaseCurve
+{
+    bool valid = false;
+    float phase[kFineBands] {};
+    float trust[kFineBands] {};
+};
+
+/** Extra delay of the lows, mids and highs around the overall delay, in ms. */
+struct ZoneDelays
+{
+    bool valid = false;
+    double lowMs = 0.0, midMs = 0.0, highMs = 0.0;
+};
+
+ZoneDelays zoneDelays (const PhaseCurve&);
+
+/** How far a phase value can be trusted (0..1), from the coherence it was read at
+    and the number of independent averages behind it. */
+double phaseTrust (double coherence, double averages);
 
 /** Windowed spectrum of one analysis frame. */
 class FrameSpectrum
@@ -23,6 +69,8 @@ public:
     explicit FrameSpectrum (int frameSize);
     /** `samples` must hold frameSize values. */
     void compute (const Fft& fft, const float* samples);
+    /** Becomes the spectrum of the sum of several signals framed at the same position. */
+    void setSum (const FrameSpectrum* const* parts, int numParts);
     const std::vector<std::complex<float>>& bins() const noexcept { return data; }
     double energy() const noexcept { return frameEnergy; }
 
@@ -33,26 +81,36 @@ private:
 };
 
 /** Accumulates the cross-spectrum between a reference and a target over as
-    many frames of programme material as you feed it, then reads the delay off
-    the coherence-weighted (SCOT) cross-correlation. Longer accumulation makes
-    the estimate steadier; it never needs a click or a test signal. */
+    many frames of programme material as you feed it. From it come the delay
+    (coherence-weighted cross-correlation), the candidate peaks, and the phase
+    left over in each 1/12 octave. Longer accumulation makes every figure
+    steadier; it never needs a click or a test signal. */
 class DelayEstimator
 {
 public:
     DelayEstimator() = default;
     void reset (int frameSize);
-    void accumulate (const FrameSpectrum& reference, const FrameSpectrum& target);
-    DelayResult estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& scratch) const;
 
-    /** Phase left over in each band once `delaySamples` and `polarity` are
-        compensated. Each value's angle is the residual phase of the target
-        against the reference; its length (0..1) says how far to trust it. */
-    void phaseBands (double sampleRate, double delaySamples, int polarity, std::complex<float>* bands) const;
+    /** Returns false when the frame was left out: silence, or the target far
+        below its recent level (its instrument is not playing, only spill). */
+    bool accumulate (const FrameSpectrum& reference, const FrameSpectrum& target);
+
+    DelayResult estimate (const Fft& fft, double sampleRate, std::vector<std::complex<float>>& scratch,
+                          SearchRange range = {}, CorrelationCurve* curve = nullptr) const;
+
+    /** Sharpens a delay to a fraction of a sample from the slope of the phase. */
+    double refineDelay (double sampleRate, double delaySamples, int polarity) const;
+
+    PhaseCurve phaseCurve (double sampleRate, double delaySamples, int polarity) const;
 
     int frames() const noexcept { return numFrames; }
+    int skipped() const noexcept { return numSkipped; }
 
 private:
-    int n = 0, numFrames = 0;
+    void transfer (double sampleRate, double delaySamples, int polarity, std::complex<double>* gamma, double* averages) const;
+
+    int n = 0, numFrames = 0, numSkipped = 0;
+    double recentPeak = 0.0;
     std::vector<std::complex<float>> sxy;
     std::vector<float> sxx, syy;
 };
