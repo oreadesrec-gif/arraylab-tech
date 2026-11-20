@@ -14,7 +14,7 @@ if errorlevel 1 (
 set "DEST=%CommonProgramFiles%\VST3"
 
 :install
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $zip = Join-Path $env:TEMP 'ArrayLab-VST3-Windows.zip'; $dest = $env:DEST; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Write-Host 'Downloading the latest ArrayLab...'; Invoke-WebRequest 'https://github.com/oreadesrec-gif/arraylab-tech/releases/download/latest/ArrayLab-VST3-Windows.zip' -OutFile $zip; foreach ($old in 'ArrayLab.vst3', 'ArrayLab Probe.vst3') { $p = Join-Path $dest $old; if (Test-Path $p) { Remove-Item $p -Recurse -Force } }; Expand-Archive $zip -DestinationPath $dest -Force; Remove-Item $zip; Write-Host ('ArrayLab installed in ' + $dest)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $zip = Join-Path $env:TEMP 'ArrayLab-VST3-Windows.zip'; $dest = $env:DEST; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Write-Host 'Downloading the latest ArrayLab...'; Invoke-WebRequest 'https://github.com/oreadesrec-gif/arraylab-tech/releases/download/latest/ArrayLab-VST3-Windows.zip' -OutFile $zip; foreach ($old in 'ArrayLab.vst3', 'ArrayLab Probe.vst3') { $p = Join-Path $dest $old; if (Test-Path $p) { Remove-Item $p -Recurse -Force } }; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest); Remove-Item $zip; Write-Host ('ArrayLab installed in ' + $dest)"
 set "RESULT=%errorlevel%"
 if not "%RESULT%"=="0" echo Installation failed. Close Pyramix and try again.
 if "%~1"=="" pause
