@@ -268,7 +268,7 @@ juce::String ArrayLabEditor::cellText (const MicInfo& m, int column) const
 juce::String ArrayLabEditor::buildReport() const
 {
     juce::String s;
-    s << "ArrayLab 0.8 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
+    s << "ArrayLab 0.8.1 | host: " << juce::PluginHostType().getHostDescription() << " | " << status.getText() << "\n";
     s << "all tracks delayed by " << juce::String (hub.sessionShiftMs(), 3) << " ms, main leads by " << juce::String (scene.leadMs, 1) << " ms\n";
     s << "Mic\tGroup\tRole\tvs L\tvs C\tvs R\tLined up\tTo gain\tApplied\tDelay\tPolarity\tPhase\tPan\tLock\tIn>Out\tRate\tTimeline\tNote\n";
     for (auto& m : mics)

@@ -20,8 +20,8 @@ public:
     // Column positions, shared by the header and every row.
     struct Columns
     {
-        static constexpr int name = 8, on = 172, gain = 216, delay = 290, minus = 400, plus = 424, flip = 454,
-                             rotation = 492, level = 590, steady = 688, solo = 772, lock = 824, end = 876;
+        static constexpr int name = 8, on = 160, gain = 204, delay = 276, minus = 386, plus = 410, flip = 440,
+                             rotation = 478, measured = 566, byFreq = 622, level = 678, steady = 772, solo = 852, lock = 902, end = 952;
     };
 
 private:

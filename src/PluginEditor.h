@@ -49,6 +49,7 @@ private:
     CheckView checkView;
     DetailView detailView;
     StripView stripView;
+    juce::TooltipWindow tooltips { this, 500 };
     int view = 0;
     juce::TableListBox table { "mics", this };
 

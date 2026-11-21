@@ -44,11 +44,18 @@ public:
         rotation.onValueChange = [this] { edit ([this] (MicState& m) { m.phaseRotationDeg = rotation.getValue(); }); };
         level.onValueChange = [this] { edit ([this] (MicState& m) { m.mixLevelDb = level.getValue(); }); };
 
-        for (auto* b : { &on, &flip, &solo, &lock })
+        for (auto* b : { &on, &flip, &solo, &lock, &byFreq })
         {
             b->setClickingTogglesState (true);
             addAndMakeVisible (*b);
         }
+
+        // What the analysis measured: the one rotation that makes the sum fullest. A click uses it.
+        measured.onClick = [this] { edit ([this] (MicState& m) { m.phaseRotationDeg = suggested; }); };
+        addAndMakeVisible (measured);
+        // Phase corrected band by band from the analysis, on top of the rotation.
+        byFreq.setColour (juce::TextButton::buttonOnColourId, ui::accent.darker (0.2f));
+        byFreq.onClick = [this] { edit ([this] (MicState& m) { m.phaseOn = byFreq.getToggleState(); }); };
         on.setColour (juce::TextButton::buttonOnColourId, ui::good.darker (0.5f));
         flip.setColour (juce::TextButton::buttonOnColourId, ui::warn.darker (0.3f));
         solo.setColour (juce::TextButton::buttonOnColourId, ui::accent.darker (0.2f));
@@ -79,7 +86,8 @@ public:
         name.setText (m.name, juce::dontSendNotification);
         name.setColour (juce::Label::textColourId, isSelected ? ui::text : colour);
         for (juce::Component* c : { (juce::Component*) &on, (juce::Component*) &delay, (juce::Component*) &minus, (juce::Component*) &plus,
-                                    (juce::Component*) &flip, (juce::Component*) &rotation, (juce::Component*) &level, (juce::Component*) &steady,
+                                    (juce::Component*) &flip, (juce::Component*) &rotation, (juce::Component*) &measured, (juce::Component*) &byFreq,
+                                    (juce::Component*) &level, (juce::Component*) &steady,
                                     (juce::Component*) &solo, (juce::Component*) &lock })
             c->setVisible (! main);
 
@@ -107,6 +115,17 @@ public:
         flip.setToggleState (a.polarity < 0, juce::dontSendNotification);
         if (! rotation.isMouseButtonDown (true) && ! rotation.hasKeyboardFocus (true))
             rotation.setValue (m.phaseRotationDeg, juce::dontSendNotification);
+        // The rotation the analysis found, and what it would add to the sum.
+        suggested = best.rotationDeg;
+        const bool hasPhase = best.valid && info.results.any();
+        measured.setEnabled (hasPhase);
+        measured.setButtonText (hasPhase ? juce::String (juce::roundToInt (best.rotationDeg)) + juce::String::fromUTF8 ("\xc2\xb0") : juce::String ("-"));
+        measured.setTooltip (hasPhase ? "Turning this mic by " + juce::String (juce::roundToInt (best.rotationDeg)) + " degrees takes its sum with the main array from "
+                                            + signedDb (best.gainDb) + " to " + signedDb (best.withRotationDb) + ". Click to use it."
+                                      : juce::String());
+        byFreq.setToggleState (m.phaseOn, juce::dontSendNotification);
+        byFreq.setButtonText (m.phaseOn && a.phaseTaps == 0 ? "wait" : "Freq");
+
         if (! level.isMouseButtonDown (true) && ! level.hasKeyboardFocus (true))
             level.setValue (m.mixLevelDb, juce::dontSendNotification);
 
@@ -146,7 +165,9 @@ public:
         minus.setBounds (C::minus, y, 22, h);
         plus.setBounds (C::plus, y, 22, h);
         flip.setBounds (C::flip, y, 30, h);
-        rotation.setBounds (C::rotation, y, C::level - C::rotation - 8, h);
+        rotation.setBounds (C::rotation, y, C::measured - C::rotation - 6, h);
+        measured.setBounds (C::measured, y, 50, h);
+        byFreq.setBounds (C::byFreq, y, 50, h);
         level.setBounds (C::level, y, C::steady - C::level - 8, h);
         steady.setBounds (C::steady, y, C::solo - C::steady - 4, h);
         solo.setBounds (C::solo, y, 46, h);
@@ -168,11 +189,12 @@ private:
     Hub& hub;
     std::function<void (int)> onSelect;
     int slot = -1;
-    double rate = 48000.0, shown = 0.0;
+    double rate = 48000.0, shown = 0.0, suggested = 0.0;
     bool selected = false, refreshing = false;
     juce::Colour colour;
     juce::Label name, gain, steady;
     juce::Slider delay, rotation, level;
+    juce::TextButton measured, byFreq { "Freq" };
     juce::TextButton on { "On" }, minus { "-" }, plus { "+" }, flip { juce::String::fromUTF8 ("\xc3\x98") }, solo { "Solo" }, lock { "Lock" };
 };
 
@@ -252,14 +274,16 @@ void StripView::paint (juce::Graphics& g)
     title (Columns::name, 150, "Microphone");
     title (Columns::on, 40, "In");
     title (Columns::gain, 70, "To gain");
-    title (Columns::delay, 160, "Delay   (-/+ one sample)");
+    title (Columns::delay, 160, "Delay  (-/+ 1 sample)");
     title (Columns::flip, 36, "Pol.");
     title (Columns::rotation, 90, "Phase turn");
+    title (Columns::measured, 60, "Measured");
+    title (Columns::byFreq, 60, "By freq.");
     title (Columns::level, 90, "Level in mix");
     title (Columns::steady, 80, "Delay holds");
     title (Columns::solo, 100, "Hear with main");
     g.setColour (ui::dim);
     g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("To gain: fuller sum with the main array once lined up.   Delay holds: its drift during the passage.",
+    g.drawText ("To gain: fuller sum once lined up.   Measured: phase turn found by the analysis, click to use it.",
                 getLocalBounds().reduced (8, 6).removeFromTop (26).withTrimmedLeft (440), juce::Justification::centredLeft, true);
 }
